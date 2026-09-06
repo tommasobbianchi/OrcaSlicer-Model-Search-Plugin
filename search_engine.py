@@ -832,7 +832,7 @@ PAGE = r"""<!DOCTYPE html>
   /* Fixed overlay: the panel used to sit below ~10 rows of cards, so opening it
      looked like nothing happened. */
   .detail-panel { position:fixed; left:50%; bottom:52px; transform:translateX(-50%);
-    width:min(620px,calc(100% - 32px)); max-height:60vh; overflow:auto; z-index:10;
+    width:min(620px,calc(100% - 32px)); max-height:72vh; overflow:auto; z-index:10;
     padding:14px 34px 14px 14px; border:1px solid var(--orca-border,#444); border-radius:8px;
     background:var(--orca-bg,#1e1e1e); box-shadow:0 6px 28px rgba(0,0,0,.55); display:none; }
   .detail-panel.active { display:block; }
@@ -843,6 +843,10 @@ PAGE = r"""<!DOCTYPE html>
   .detail-panel a { color:var(--orca-accent,#4a9eff); }
   .detail-panel button { margin-top:10px; padding:8px 20px; border:none; border-radius:6px; background:var(--orca-accent,#4a9eff); color:var(--orca-accent-fg,#fff); cursor:pointer; font-size:0.95em; }
   .detail-panel button:disabled { opacity:0.35; cursor:not-allowed; }
+  /* The file picker makes the panel taller than its 60vh, and this button is the
+     last child: without sticky it scrolls out of sight, which is the same
+     below-the-fold trap that made Import look dead once already. */
+  #det-import-btn { position:sticky; bottom:0; }
   .detail-panel button.secondary { background:transparent; border:1px solid var(--orca-border,#444);
     color:var(--orca-fg,#eee); margin-left:8px; }
   /* Fixed, not in the flow: it used to sit under 30 result cards, thousands of
@@ -857,6 +861,14 @@ PAGE = r"""<!DOCTYPE html>
   /* Always visible next to the licence: the detail panel is the only route to a download,
      so this is the notice every user passes through. */
   .license-url { color:var(--orca-muted,#888); font-size:0.8em; word-break:break-all; }
+  /* A print can hold dozens of parts; without a choice every one of them lands on
+     the plate at once. Hidden until the resolver reports more than one file. */
+  .file-picker { display:none; margin:8px 0 0; max-height:150px; overflow:auto;
+    border:1px solid var(--orca-border,#444); border-radius:6px; padding:6px 8px; }
+  .file-picker.active { display:block; }
+  .file-picker label { display:block; font-size:0.85em; padding:2px 0; word-break:break-all; }
+  .file-picker .hint { color:var(--orca-muted,#888); font-size:0.8em; margin-bottom:4px; }
+  .file-picker .hint button { font-size:0.9em; padding:1px 6px; margin-left:6px; }
   .responsibility { margin:10px 0 0; padding:8px 10px; border-left:3px solid var(--orca-border,#444);
     color:var(--orca-muted,#888); font-size:0.8em; line-height:1.45; }
 </style>
@@ -886,6 +898,7 @@ PAGE = r"""<!DOCTYPE html>
     If a design is protected by copyright, downloading or using it against the rights
     holder's terms is your act alone, and the authors of this plugin accept no liability
     for it.</p>
+  <div id="det-files" class="file-picker"></div>
   <button id="det-import-btn" onclick="doImport()">Import into OrcaSlicer</button>
 </div>
 <div id="status">Ready. Type a keyword and press Search.</div>
@@ -951,6 +964,7 @@ PAGE = r"""<!DOCTYPE html>
     $("det-license").innerHTML = "<strong>License:</strong> <span class=\"license-badge " + licenseClass(model.license) + "\">" + esc(model.license || "Unknown") + "</span>"
       + (model.license_url ? " <span class=\"license-url\">" + esc(model.license_url) + "</span>" : "");
     $("det-summary").textContent = model.license_summary || "No license information available.";
+    hideFilePicker();
     resetImportBtn();
     // Shown as plain text, never as a link: nothing in this panel may navigate the
     // webview or reach the system browser.
@@ -960,17 +974,62 @@ PAGE = r"""<!DOCTYPE html>
 
   function doImport() {
     if (!selectedModel) return;
+    // null on the first press: Python resolves the files and, for a multi-part
+    // print, sends them back to be picked before anything is downloaded.
+    var files = chosenFiles();
+    if (files && files.length === 0) {
+      $("status").textContent = "Select at least one file to import.";
+      return;
+    }
     var btn = $("det-import-btn");
     btn.disabled = true;
     btn.textContent = "Importing...";
-    $("status").textContent = "Resolving files...";
-    orca.postMessage({action:"import", model:selectedModel});
+    $("status").textContent = files ? "Downloading..." : "Resolving files...";
+    orca.postMessage({action:"import", model:selectedModel, files:files});
+  }
+
+  function showFilePicker(files) {
+    window._files = files;
+    var html = '<div class="hint">' + files.length + ' files in this print \u2014 untick what you'
+             + ' do not want on the plate.<button type="button" onclick="setAllFiles(true)">All</button>'
+             + '<button type="button" onclick="setAllFiles(false)">None</button></div>';
+    for (var i = 0; i < files.length; i++) {
+      html += '<label><input type="checkbox" checked data-fidx="' + i + '"> '
+            + esc(files[i].name) + '</label>';
+    }
+    var p = $("det-files");
+    p.innerHTML = html;
+    p.classList.add("active");
+    resetImportBtn();
+  }
+
+  function hideFilePicker() {
+    var p = $("det-files");
+    p.classList.remove("active");
+    p.innerHTML = "";
+    window._files = null;
+  }
+
+  function setAllFiles(on) {
+    var boxes = $("det-files").querySelectorAll("input[type=checkbox]");
+    for (var i = 0; i < boxes.length; i++) boxes[i].checked = on;
+  }
+
+  function chosenFiles() {
+    var p = $("det-files");
+    if (!p.classList.contains("active")) return null;
+    var out = [], boxes = p.querySelectorAll("input[type=checkbox]");
+    for (var i = 0; i < boxes.length; i++) {
+      if (boxes[i].checked) out.push(window._files[parseInt(boxes[i].dataset.fidx, 10)]);
+    }
+    return out;
   }
 
   function resetImportBtn() {
     var btn = $("det-import-btn");
     btn.disabled = false;
-    btn.textContent = "Import into OrcaSlicer";
+    btn.textContent = $("det-files").classList.contains("active")
+      ? "Import selected" : "Import into OrcaSlicer";
   }
 
   function licenseClass(lic) {
@@ -989,6 +1048,7 @@ PAGE = r"""<!DOCTYPE html>
   });
   $("det-close").addEventListener("click", function() {
     $("detail").classList.remove("active");
+    hideFilePicker();
     selectedModel = null;
   });
 
@@ -1010,6 +1070,11 @@ PAGE = r"""<!DOCTYPE html>
       }
     } else if (msg && msg.action === "status") {
       $("status").textContent = msg.message;
+      $("status").classList.remove("error");
+    } else if (msg && msg.action === "choose_files") {
+      showFilePicker(msg.files);
+      $("status").textContent = msg.files.length
+        + " files in this print - choose, then press Import selected.";
       $("status").classList.remove("error");
     } else if (msg && msg.action === "imported") {
       resetImportBtn();
@@ -1058,6 +1123,9 @@ if orca is not None:
                     " var c = i >= 0 ? document.querySelector('#results .card[data-idx=\"' + i + '\"]') : null;"
                     " jlog('AUTORUN importable idx=' + i + ' card=' + !!c); if (c) c.click(); }, 9000);"
                     "setTimeout(function(){ jlog('AUTORUN import click'); doImport(); }, 12000);"
+                    # A multi-part print stops at the picker, so press again.
+                    "setTimeout(function(){ if ($('det-files').classList.contains('active'))"
+                    " { jlog('AUTORUN picker confirm'); doImport(); } }, 16000);"
                     "\n</script>\n</body></html>")
 
             self.win = orca.host.ui.create_window(
@@ -1081,7 +1149,8 @@ if orca is not None:
             elif action == "import":
                 model = msg.get("model") or {}
                 if model:
-                    threading.Thread(target=self._do_import, args=(model,), daemon=True).start()
+                    threading.Thread(target=self._do_import,
+                                     args=(model, msg.get("files")), daemon=True).start()
 
         def on_close(self):
             self.win = None
@@ -1121,8 +1190,17 @@ if orca is not None:
                             "message": "%d result(s); %s" % (len(results), "; ".join(errors))})
             self.win.post({"action": "results", "results": results})
 
-        def _do_import(self, model):
-            """Download the model's files and load them into the running plater."""
+        def _do_import(self, model, files=None):
+            """Download the model's files and load them into the running plater.
+
+            `files` is None on the first press: the print's files are resolved and,
+            if there is more than one, handed back to the UI to be picked. A print
+            can carry dozens of parts, and importing all of them unasked buries the
+            plate.
+            """
+            if files:
+                self._import_files(model, files)
+                return
             resolver = _FILE_RESOLVERS.get(model.get("platform", ""))
             if resolver is None:
                 # Defensive only: _do_search filters these out before they reach the UI.
@@ -1138,7 +1216,12 @@ if orca is not None:
             if not files:
                 self._post({"action": "error", "message": "No downloadable files found."})
                 return
+            if len(files) > 1:
+                self._post({"action": "choose_files", "files": files})
+                return
+            self._import_files(model, files)
 
+        def _import_files(self, model, files):
             dest_dir = _download_dir()
             try:
                 os.makedirs(dest_dir, exist_ok=True)

@@ -163,11 +163,19 @@ Screenshots: `scrot` returns black under Xwayland; capture the window instead �
    nothing for its users: the eight platform-suffixed `.py` files staged in
    `behemoth:~/Scaricati/` have to be uploaded by hand at cloud.orcaslicer.com while
    signed in to OrcaCloud (the client has no publish API). All eight currently match
-   HEAD, md5 `e719454af6d116ce3d80636ff588f246`.
+   HEAD, md5 `a2cda089fe59ee263522e22bf6279d72`.
 1. **More importable platforms** — all three others gate files behind a login. Options:
    reuse the browser session's cookies, or add per-platform auth. Nothing else is scrapeable.
-2. **Multi-file prints** — every STL of a print is downloaded and loaded. A print with
-   many parts will drop them all on the plate; a file picker may be wanted.
+2. **Multi-file prints — done.** A print with more than one file now stops at a picker:
+   the resolver's list comes back to the panel as a checkbox per file (All / None
+   buttons, all ticked), and only the ticked ones are downloaded. A single-file print
+   still imports on one press. `test_file_picker.py` covers the three cases with a stub
+   `orca` module and no network.
+
+   Note what a big print costs regardless: Flexi Capy Snek (1041594) is 14 files, and
+   Orca then raises its own modal per part that is too small to be millimetres (the
+   Teeth-Brim / Teeth-Joiner pieces) plus a "multiple parts detected" prompt. Ticking
+   everything means clicking through all of them.
 3. **`orcaslicer://` deep links** — `GUI_App::start_download()` exists and the
    `AnotherInstance` payload accepts `orcaslicer://open?file=<url>`, letting Orca do the
    download itself. Unused; the plugin fetches with `requests` for control over headers.
