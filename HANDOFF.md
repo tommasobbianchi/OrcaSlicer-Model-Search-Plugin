@@ -37,15 +37,25 @@ gated — this is not stale inherited knowledge:
 Disabled: Thingiverse (`/download:ID` → 403 robots), GrabCAD (API retired).
 
 ### How the Printables download works
-`api.printables.com/graphql/` is open (introspection off, queries fine). The file
-URL is not in the schema, but `stls { name filePreviewPath }` is — and the preview
-image sits in the same folder as the STL:
+`api.printables.com/graphql/` is open (introspection off, queries fine) and the site's
+own download call needs no authentication. Two requests per print: list the files,
+then ask for each file's real URL.
 
 ```
-filePreviewPath: media/prints/3161/stls/123914_<uuid>/3dbenchy_preview.png
-→ https://files.printables.com/media/prints/3161/stls/123914_<uuid>/3dbenchy.stl
-   HTTP 200, application/sla, 11285384 bytes, magic "solid Shape0"
+{print(id:1041594){stls{id name}}}
+mutation { getDownloadLink(id: <stlId>, printId: <printId>,
+                           fileType: stl, source: model_detail) { ok output { link } } }
 ```
+
+**Do not derive the URL from `filePreviewPath`.** That was the old recipe — strip the
+basename off the preview path, append the file name — and it only holds for prints
+stored the old way (`media/prints/<id>/stls/<n>_<uuid>/<name>_preview.png`). Newer
+prints keep previews in their own subfolder (`media/prints/<uuid>/previews/<sha>.png`),
+where the derived URL 404s and Import fails with nothing on the plate. 3dbenchy (3161)
+is an old-layout print, which is why every test passed while real models did not work.
+
+Verified 2026-09-06 against both layouts: Flexi Capy Snek (1041594), 14 files, first is
+HTTP 200 `model/stl` 4307484 bytes; 3D Benchy (3161) still HTTP 200, 11285384 bytes.
 
 ### How the file reaches Prepare (all three OSes)
 The plugin host API is **read-only** — `orca.host.model/mesh/presets/slicing` only
@@ -149,6 +159,11 @@ Screenshots: `scrot` returns black under Xwayland; capture the window instead �
 
 ## Next
 
+0. **Publish v0.2.0 to the hub.** The hub does not sync from GitHub, so a push changes
+   nothing for its users: the eight platform-suffixed `.py` files staged in
+   `behemoth:~/Scaricati/` have to be uploaded by hand at cloud.orcaslicer.com while
+   signed in to OrcaCloud (the client has no publish API). All eight currently match
+   HEAD, md5 `e719454af6d116ce3d80636ff588f246`.
 1. **More importable platforms** — all three others gate files behind a login. Options:
    reuse the browser session's cookies, or add per-platform auth. Nothing else is scrapeable.
 2. **Multi-file prints** — every STL of a print is downloaded and loaded. A print with
