@@ -24,25 +24,54 @@ import time
 import urllib.parse
 
 
-def _download_dir():
-    """Where downloaded models are written.
+def _orca_data_dir():
+    """Orca's data directory, or "" when the file is not installed as a plugin.
 
-    The CPython audit hook only permits writes under Orca's datadir — the log
-    says so on every start ("[AUDIT] Global allowed root: <datadir>"), so
-    ~/Downloads raises PermissionError once a build enforces it. Plugins live at
-    <datadir>/orca_plugins/<name>/<file>.py, and cloud-subscribed ones a couple
-    of levels deeper, so walk up until orca_plugins is the child.
+    Plugins live at <datadir>/orca_plugins/<name>/<file>.py, and cloud-subscribed
+    ones a couple of levels deeper, so walk up until orca_plugins is the child.
     """
     path = os.path.dirname(os.path.abspath(__file__))
     while True:
         parent, leaf = os.path.split(path)
         if leaf == "orca_plugins":
-            return os.path.join(parent, "model_downloads")
+            return parent
         if not parent or parent == path:
-            # Not installed under orca_plugins (running the file directly);
-            # nothing is auditing us, so the old location is fine.
-            return os.path.join(os.path.expanduser("~/Downloads"), "OrcaModelSearch")
+            return ""
         path = parent
+
+
+def _download_dir():
+    """Where downloaded models are written.
+
+    The CPython audit hook only permits writes under Orca's datadir — the log
+    says so on every start ("[AUDIT] Global allowed root: <datadir>"), so
+    ~/Downloads raises PermissionError once a build enforces it.
+    """
+    datadir = _orca_data_dir()
+    if datadir:
+        return os.path.join(datadir, "model_downloads")
+    # Running the file directly: nothing is auditing us, so the old location is fine.
+    return os.path.join(os.path.expanduser("~/Downloads"), "OrcaModelSearch")
+
+
+def _own_instance_hashes():
+    """Instance hashes that belong to *this* data directory, newest first.
+
+    instance_check() names its lock file <hash>.lock under <datadir>/cache/ and
+    the D-Bus name carries the same hash, so the cache directory identifies which
+    of the buses on the session belongs to the app hosting this plugin. Old
+    builds leave their locks behind, hence a candidate list rather than one answer.
+    """
+    datadir = _orca_data_dir()
+    if not datadir:
+        return []
+    cache = os.path.join(datadir, "cache")
+    try:
+        locks = [f for f in os.listdir(cache) if f.endswith(".lock") and f[:-5].isdigit()]
+    except OSError:
+        return []
+    locks.sort(key=lambda f: os.path.getmtime(os.path.join(cache, f)), reverse=True)
+    return [f[:-5] for f in locks]
 
 
 LICENSE_DESCRIPTIONS = {
@@ -211,7 +240,18 @@ def _load_in_orca_dbus(paths):
     if not found:
         return False, "no running instance on the session bus"
 
-    instance = found[0]
+    # found[0] is whichever Orca answered first, which is not necessarily the one
+    # hosting this plugin: run OrcaCAD next to a belt build, or leave a second
+    # instance open, and the model silently lands on the *other* window's plate.
+    # The lock files under our own datadir say which hash is ours.
+    own = _own_instance_hashes()
+    instance = next((h for h in own if h in found), None)
+    if instance is None:
+        if len(found) > 1:
+            return False, ("%d OrcaSlicer instances are on the session bus and none "
+                           "matches this data directory; refusing to guess which one "
+                           "should receive the model" % len(found))
+        instance = found[0]
     payload = _instance_payload(paths)
     iface = "com.orcaslicer.OrcaSlicer.InstanceCheck.Object" + instance
     try:
