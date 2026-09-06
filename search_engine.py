@@ -1021,6 +1021,7 @@ if orca is not None:
             query = msg.get("query", "")
             platforms = msg.get("platforms", [])
             results = []
+            errors = []
             for platform in platforms:
                 adapter = _SEARCHERS.get(platform)
                 if not adapter:
@@ -1035,7 +1036,20 @@ if orca is not None:
                 try:
                     results.extend(adapter.search(query, {}))
                 except Exception as e:
-                    self.win.post({"action": "error", "message": f"{platform}: {e}"})
+                    # Posting the error here used to be pointless: the results
+                    # message below arrived straight after and overwrote the
+                    # status line with "No results found", so a failed search was
+                    # indistinguishable from a search that found nothing — an
+                    # empty dark window with no explanation.
+                    errors.append("%s: %s" % (platform, e))
+                    print("[search_engine] %s search failed: %r"
+                          % (platform, e), file=sys.stderr, flush=True)
+            if errors and not results:
+                self._post({"action": "error", "message": "; ".join(errors)})
+                return
+            if errors:
+                self._post({"action": "status",
+                            "message": "%d result(s); %s" % (len(results), "; ".join(errors))})
             self.win.post({"action": "results", "results": results})
 
         def _do_import(self, model):
