@@ -566,38 +566,54 @@ class PrintablesSearcher:
 
     GRAPHQL_URL = "https://api.printables.com/graphql/"
 
+    # The site's own download call. It needs no authentication and returns the
+    # real file URL, which replaces the old trick of deriving the STL path from
+    # the preview image's folder: that only held for prints stored the old way
+    # (media/prints/<id>/stls/<n>_<uuid>/<name>_preview.png). Newer prints keep
+    # previews in their own subfolder (media/prints/<uuid>/previews/<sha>.png),
+    # where the derived path 404s and Import failed with nothing on the plate.
+    DOWNLOAD_MUTATION = (
+        "mutation Link($id: ID!, $printId: ID!) {"
+        " getDownloadLink(id: $id, printId: $printId, fileType: stl,"
+        " source: model_detail) { ok output { link } } }"
+    )
+
     @staticmethod
     def get_files(model_url):
-        """Public STL URLs for a print.
-
-        Printables' GraphQL is open, and files.printables.com serves the STLs
-        with no auth. The file itself is not in the schema, but the preview
-        image is, and it sits in the same folder as the STL.
-        """
+        """Public STL URLs for a print, one getDownloadLink call per file."""
         import requests
 
         m = re.search(r"/model/(\d+)", model_url or "")
         if not m:
             return []
-        q = "{print(id:%s){stls{name filePreviewPath}}}" % m.group(1)
+        print_id = m.group(1)
+        headers = {"Content-Type": "application/json", "User-Agent": _BROWSER_UA}
         r = requests.post(
             PrintablesSearcher.GRAPHQL_URL,
-            json={"query": q},
-            headers={"Content-Type": "application/json", "User-Agent": _BROWSER_UA},
-            timeout=30,
+            json={"query": "{print(id:%s){stls{id name}}}" % print_id},
+            headers=headers, timeout=30,
         )
         r.raise_for_status()
         stls = ((r.json().get("data") or {}).get("print") or {}).get("stls") or []
         files = []
-        for s in stls:
-            preview, name = s.get("filePreviewPath") or "", s.get("name") or ""
-            if not preview or "/" not in preview or not name:
+        for stl in stls:
+            stl_id, name = stl.get("id"), stl.get("name") or ""
+            if not stl_id or not name:
                 continue
-            folder = preview.rsplit("/", 1)[0]
-            files.append({
-                "name": name,
-                "url": "https://files.printables.com/%s/%s" % (folder, urllib.parse.quote(name)),
-            })
+            lr = requests.post(
+                PrintablesSearcher.GRAPHQL_URL,
+                json={"query": PrintablesSearcher.DOWNLOAD_MUTATION,
+                      "variables": {"id": str(stl_id), "printId": print_id}},
+                headers=headers, timeout=30,
+            )
+            lr.raise_for_status()
+            payload = lr.json()
+            if payload.get("errors"):
+                raise RuntimeError(payload["errors"][0].get("message", "GraphQL error"))
+            got = ((payload.get("data") or {}).get("getDownloadLink") or {})
+            link = (got.get("output") or {}).get("link")
+            if got.get("ok") and link:
+                files.append({"name": name, "url": link})
         return files
 
 
@@ -815,7 +831,7 @@ PAGE = r"""<!DOCTYPE html>
   .license-unk { background:#444; color:#aaa; }
   /* Fixed overlay: the panel used to sit below ~10 rows of cards, so opening it
      looked like nothing happened. */
-  .detail-panel { position:fixed; left:50%; bottom:16px; transform:translateX(-50%);
+  .detail-panel { position:fixed; left:50%; bottom:52px; transform:translateX(-50%);
     width:min(620px,calc(100% - 32px)); max-height:60vh; overflow:auto; z-index:10;
     padding:14px 34px 14px 14px; border:1px solid var(--orca-border,#444); border-radius:8px;
     background:var(--orca-bg,#1e1e1e); box-shadow:0 6px 28px rgba(0,0,0,.55); display:none; }
@@ -829,7 +845,15 @@ PAGE = r"""<!DOCTYPE html>
   .detail-panel button:disabled { opacity:0.35; cursor:not-allowed; }
   .detail-panel button.secondary { background:transparent; border:1px solid var(--orca-border,#444);
     color:var(--orca-fg,#eee); margin-left:8px; }
-  #status { margin-top:10px; color:var(--orca-muted,#888); font-size:0.8em; }
+  /* Fixed, not in the flow: it used to sit under 30 result cards, thousands of
+     pixels below the fold, so every error and every progress message was
+     invisible. Pressing Import and seeing nothing happen was exactly this. */
+  #status { position:fixed; left:0; right:0; bottom:0; z-index:20; padding:6px 14px;
+    background:var(--orca-bg,#1e1e1e); border-top:1px solid var(--orca-border,#444);
+    color:var(--orca-muted,#888); font-size:0.8em; }
+  #status.error { color:#ff6b6b; border-top-color:#ff6b6b; }
+  /* Keep the last row of cards clear of the fixed status bar. */
+  body { padding-bottom:44px; }
   /* Always visible next to the licence: the detail panel is the only route to a download,
      so this is the notice every user passes through. */
   .license-url { color:var(--orca-muted,#888); font-size:0.8em; word-break:break-all; }
@@ -986,6 +1010,7 @@ PAGE = r"""<!DOCTYPE html>
       }
     } else if (msg && msg.action === "status") {
       $("status").textContent = msg.message;
+      $("status").classList.remove("error");
     } else if (msg && msg.action === "imported") {
       resetImportBtn();
       $("status").textContent = "Imported " + msg.count + " file(s) into OrcaSlicer - see Prepare.";
@@ -999,7 +1024,9 @@ PAGE = r"""<!DOCTYPE html>
       btn.disabled = false;
       btn.textContent = "Search";
       resetImportBtn();
-      document.getElementById("status").textContent = "Error: " + msg.message;
+      var st = document.getElementById("status");
+      st.textContent = "Error: " + msg.message;
+      st.classList.add("error");
     }
   });
 </script>
@@ -1023,7 +1050,9 @@ if orca is not None:
                 # ponytail: debug-only self-drive, so the probes run without a mouse.
                 html = html.replace(
                     "</script>\n</body></html>",
-                    "setTimeout(function(){ $(\"query\").value = \"benchy\"; doSearch(); }, 1500);"
+                    "setTimeout(function(){ $(\"query\").value = "
+                    + ("\"%s\"" % os.environ.get("SEARCH_ENGINE_AUTORUN_QUERY", "benchy"))
+                    + "; doSearch(); }, 1500);"
                     "setTimeout(function(){ var i = -1;"
                     " for (var k = 0; k < window._results.length; k++) if (window._results[k].importable) { i = k; break; }"
                     " var c = i >= 0 ? document.querySelector('#results .card[data-idx=\"' + i + '\"]') : null;"
