@@ -4,9 +4,9 @@
 #
 # [tool.orcaslicer.plugin]
 # name = "3D Model Search Engine"
-# description = "Search and download 3D models from MakerWorld, Nexprint, Makeronline, and Printables directly within OrcaSlicer. License metadata is always displayed before download."
+# description = "Search 3D models from inside OrcaSlicer and load them straight onto the plate. Only platforms whose files can be fetched without leaving the app are offered, and the licence is always shown before the download. No external browser is ever opened."
 # author = "Tommaso Bianchi"
-# version = "0.1.1"
+# version = "0.2.0"
 # ///
 
 try:
@@ -64,14 +64,140 @@ _BROWSER_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                "(KHTML, like Gecko) Chrome/131.0 Safari/537.36")
 
 
+def _orca_executable():
+    """Absolute path of the running OrcaSlicer binary.
+
+    Each OS has its own way to ask; sys.executable is the embedded interpreter's
+    idea of it and is only the last resort.
+    """
+    if sys.platform == "darwin":
+        import ctypes
+
+        buf = ctypes.create_string_buffer(4096)
+        size = ctypes.c_uint32(len(buf))
+        if ctypes.CDLL(None)._NSGetExecutablePath(buf, ctypes.byref(size)) == 0:
+            return os.path.realpath(buf.value.decode())
+    elif os.name == "nt":
+        import ctypes
+
+        buf = ctypes.create_unicode_buffer(4096)
+        if ctypes.windll.kernel32.GetModuleFileNameW(None, buf, len(buf)):
+            return buf.value
+    else:
+        try:
+            return os.path.realpath("/proc/self/exe")
+        except OSError:
+            pass
+    return sys.executable or ""
+
+
+def _instance_payload(paths):
+    """The argv list instance_check sends, in unescape_strings_cstyle format:
+    semicolon-separated and quoted. argv[0] is skipped as the executable path."""
+    argv = ["orca-slicer"] + list(paths)
+    return ";".join('"%s"' % a.replace("\\", "\\\\").replace('"', '\\"') for a in argv)
+
+
+def _handoff_windows(paths):
+    """Deliver the files through WM_COPYDATA, the way a second launch would.
+
+    GUI_App registers an MSW handler for WM_COPYDATA with dwData == 1 and passes
+    the wide string straight to handle_message(). InstanceCheck finds the target
+    by comparing instance hashes, but this code runs *inside* the target process,
+    so matching our own PID identifies the window without any hash at all.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32.GetPropW.restype = wintypes.HANDLE
+    user32.GetPropW.argtypes = [wintypes.HWND, wintypes.LPCWSTR]
+    user32.SendMessageW.restype = ctypes.c_longlong
+    user32.SendMessageW.argtypes = [wintypes.HWND, ctypes.c_uint,
+                                    ctypes.c_void_p, ctypes.c_void_p]
+
+    class COPYDATASTRUCT(ctypes.Structure):
+        _fields_ = [("dwData", ctypes.c_void_p),
+                    ("cbData", wintypes.DWORD),
+                    ("lpData", ctypes.c_void_p)]
+
+    our_pid = kernel32.GetCurrentProcessId()
+    found = []
+
+    def _enum(hwnd, _lparam):
+        name = ctypes.create_unicode_buffer(256)
+        if user32.GetClassNameW(hwnd, name, 256) == 0 or name.value != "wxWindowNR":
+            return True
+        # Both properties are set on the main frame only (init_windows_properties).
+        if not user32.GetPropW(hwnd, "Instance_Hash_Minor"):
+            return True
+        if not user32.GetPropW(hwnd, "Instance_Hash_Major"):
+            return True
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value != our_pid:
+            return True
+        found.append(hwnd)
+        return False
+
+    proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(_enum)
+    user32.EnumWindows(proc, 0)
+    if not found:
+        return False, "no OrcaSlicer main window found in this process"
+
+    buf = ctypes.create_unicode_buffer(_instance_payload(paths))
+    data = COPYDATASTRUCT(ctypes.c_void_p(1), ctypes.sizeof(buf),
+                          ctypes.cast(buf, ctypes.c_void_p))
+    # WM_COPYDATA. SendMessage blocks until the GUI thread has handled it, which
+    # is fine from this worker thread and would deadlock only on the GUI thread.
+    user32.SendMessageW(found[0], 0x004A, None, ctypes.byref(data))
+    return True, ""
+
+
+def _handoff_macos(paths):
+    """Hand the files to the running app through LaunchServices.
+
+    `open -a <bundle> <file>` sends an "open documents" Apple Event to the
+    instance that is already running, which wxWidgets turns into MacOpenFiles().
+    Orca only spawns a second slicer there for .3mf files, and models arrive as
+    .stl/.step, so they load into this instance. This avoids reimplementing
+    NSDistributedNotificationCenter in ctypes for no gain.
+    """
+    exe = _orca_executable()
+    bundle = exe
+    for _ in range(3):  # <bundle>.app/Contents/MacOS/<exe>
+        bundle = os.path.dirname(bundle)
+    if not bundle.endswith(".app"):
+        return False, "not running from an .app bundle (%s)" % exe
+    try:
+        subprocess.Popen(["/usr/bin/open", "-a", bundle] + list(paths),
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        return False, "open -a %s: %s" % (os.path.basename(bundle), e)
+    return True, ""
+
+
 def _load_in_orca(paths):
     """Hand local files to the running OrcaSlicer so they land in Prepare.
 
-    The plugin host API is read-only, but every instance listens on the session
-    bus for the same message a second launch would send (InstanceCheck.cpp);
-    file paths there reach EVT_LOAD_MODEL_OTHER_INSTANCE, i.e. the plater.
-    The payload is an argv list in unescape_strings_cstyle format, and argv[0]
-    is skipped as the executable path.
+    The plugin host API is read-only, but every instance listens for the message
+    a second launch would send it (InstanceCheck.cpp); file paths there reach
+    EVT_LOAD_MODEL_OTHER_INSTANCE, i.e. the plater. Each OS has its own
+    transport, and only the Linux one can be exercised here.
+    """
+    if os.name == "nt":
+        return _handoff_windows(paths)
+    if sys.platform == "darwin":
+        return _handoff_macos(paths)
+    return _load_in_orca_dbus(paths)
+
+
+def _load_in_orca_dbus(paths):
+    """Linux transport: the session-bus message a second launch would send.
+
+    The interface, object and method all carry the instance hash, which is
+    discovered from ListNames so nothing needs configuring.
     """
     try:
         names = subprocess.run(
@@ -86,8 +212,7 @@ def _load_in_orca(paths):
         return False, "no running instance on the session bus"
 
     instance = found[0]
-    argv = ["orca-slicer"] + list(paths)
-    payload = ";".join('"%s"' % a.replace("\\", "\\\\").replace('"', '\\"') for a in argv)
+    payload = _instance_payload(paths)
     iface = "com.orcaslicer.OrcaSlicer.InstanceCheck.Object" + instance
     try:
         p = subprocess.run(
@@ -106,9 +231,28 @@ def _parse_license(name, url=""):
     name = (name or "").strip()
     summary = LICENSE_DESCRIPTIONS.get(name, "")
     if not summary:
-        if "CC" in name.upper():
-            summary = "Creative Commons license. See full text for terms."
-        elif "GPL" in name.upper():
+        upper = name.upper()
+        # Printables spells them out ("Creative Commons - Attribution - Noncommercial"),
+        # so matching only the "CC" abbreviation left every Printables result with no
+        # summary at all — the panel said "No license information available" next to a
+        # perfectly well-known licence.
+        if "CC" in upper or "CREATIVE COMMONS" in upper:
+            clauses = []
+            if "ATTRIBUTION" in upper or "BY" in upper.split():
+                clauses.append("credit the author")
+            if "NONCOMMERCIAL" in upper or "NON-COMMERCIAL" in upper or "NC" in upper.split():
+                clauses.append("non-commercial use only")
+            if "NO DERIVATIVES" in upper or "NODERIV" in upper or "ND" in upper.split():
+                clauses.append("no modifications")
+            if "SHARE ALIKE" in upper or "SHAREALIKE" in upper or "SA" in upper.split():
+                clauses.append("remixes under the same licence")
+            if "PUBLIC DOMAIN" in upper or "CC0" in upper:
+                summary = "Public domain. No rights reserved. Free for any use."
+            elif clauses:
+                summary = "Creative Commons: " + ", ".join(clauses) + "."
+            else:
+                summary = "Creative Commons license. See full text for terms."
+        elif "GPL" in upper:
             summary = "GNU General Public License. Share modifications."
     return {"name": name, "url": url, "summary": summary}
 
@@ -145,6 +289,10 @@ MAKERONLINE_BASE = "https://www.makeronline.com"
 
 
 class MakeronlineSearcher:
+    # Matches the "platform" field of this adapter's results, so _do_search can
+    # check it against _FILE_RESOLVERS before offering the platform at all.
+    PLATFORM = "Makeronline"
+
     SEARCH_URL = f"{MAKERONLINE_BASE}/api/search/model"
 
     @staticmethod
@@ -240,6 +388,10 @@ NEXPRINT_BASE = "https://www.nexprint.com"
 
 
 class NexprintSearcher:
+    # Matches the "platform" field of this adapter's results, so _do_search can
+    # check it against _FILE_RESOLVERS before offering the platform at all.
+    PLATFORM = "Nexprint"
+
     SEARCH_URL = f"{NEXPRINT_BASE}/gateway/api/v1/model-library-server/model-base-info/search"
 
     @staticmethod
@@ -305,6 +457,10 @@ class NexprintSearcher:
 
 
 class PrintablesSearcher:
+    # Matches the "platform" field of this adapter's results, so _do_search can
+    # check it against _FILE_RESOLVERS before offering the platform at all.
+    PLATFORM = "Printables"
+
     # printables.com/search/models is behind a Cloudflare JS challenge — it answers
     # 403 "Just a moment..." to any client that cannot run the challenge script, no
     # matter the User-Agent. So ask the API the same thing the site's own frontend
@@ -406,6 +562,10 @@ class PrintablesSearcher:
 
 
 class ThingiverseSearcher:
+    # Matches the "platform" field of this adapter's results, so _do_search can
+    # check it against _FILE_RESOLVERS before offering the platform at all.
+    PLATFORM = "Thingiverse"
+
     BASE = "https://api.thingiverse.com"
 
     @staticmethod
@@ -443,6 +603,10 @@ class ThingiverseSearcher:
 
 
 class MakerWorldSearcher:
+    # Matches the "platform" field of this adapter's results, so _do_search can
+    # check it against _FILE_RESOLVERS before offering the platform at all.
+    PLATFORM = "MakerWorld"
+
     SEARCH_URL = "https://api.bambulab.com/v1/search-service/select/design2"
     BASE = "https://makerworld.com"
 
@@ -518,6 +682,10 @@ class MakerWorldSearcher:
 
 
 class GrabcadSearcher:
+    # Matches the "platform" field of this adapter's results, so _do_search can
+    # check it against _FILE_RESOLVERS before offering the platform at all.
+    PLATFORM = "GrabCAD"
+
     BASE = "https://api.grabcad.com/api/v1"
 
     @staticmethod
@@ -624,6 +792,7 @@ PAGE = r"""<!DOCTYPE html>
   #status { margin-top:10px; color:var(--orca-muted,#888); font-size:0.8em; }
   /* Always visible next to the licence: the detail panel is the only route to a download,
      so this is the notice every user passes through. */
+  .license-url { color:var(--orca-muted,#888); font-size:0.8em; word-break:break-all; }
   .responsibility { margin:10px 0 0; padding:8px 10px; border-left:3px solid var(--orca-border,#444);
     color:var(--orca-muted,#888); font-size:0.8em; line-height:1.45; }
 </style>
@@ -633,10 +802,10 @@ PAGE = r"""<!DOCTYPE html>
   <button id="search-btn" onclick="doSearch()">Search</button>
 </div>
 <div class="platforms">
-  <label><input type="checkbox" checked data-platform="nexprint"> Nexprint (Elegoo)</label>
+  <!-- Only platforms with an entry in _FILE_RESOLVERS belong here. Everything listed
+       must import onto the plate; a result the plugin cannot fetch has no route left,
+       because handing it to the system browser is no longer permitted. -->
   <label><input type="checkbox" checked data-platform="printables"> Printables</label>
-  <label><input type="checkbox" checked data-platform="makeronline"> Makeronline (Anycubic)</label>
-  <label><input type="checkbox" checked data-platform="makerworld"> MakerWorld (Bambu Lab)</label>
 </div>
 <div id="results"></div>
 <div id="detail" class="detail-panel">
@@ -654,7 +823,6 @@ PAGE = r"""<!DOCTYPE html>
     holder's terms is your act alone, and the authors of this plugin accept no liability
     for it.</p>
   <button id="det-import-btn" onclick="doImport()">Import into OrcaSlicer</button>
-  <button id="det-dl-btn" class="secondary" onclick="doDownload()">Open in browser</button>
 </div>
 <div id="status">Ready. Type a keyword and press Search.</div>
 <script>
@@ -713,31 +881,17 @@ PAGE = r"""<!DOCTYPE html>
     $("det-name").textContent = model.name;
     $("det-author").innerHTML = "<strong>Author:</strong> " + esc(model.author);
     $("det-platform").innerHTML = "<strong>Platform:</strong> " + esc(model.platform);
+    // The licence URL stays visible as text: an <a> would either navigate this
+    // webview away (killing the plugin UI) or need an external browser, and the
+    // plugin no longer opens one.
     $("det-license").innerHTML = "<strong>License:</strong> <span class=\"license-badge " + licenseClass(model.license) + "\">" + esc(model.license || "Unknown") + "</span>"
-      + (model.license_url ? " <a href=\"" + esc(model.license_url) + "\" target=\"_blank\" rel=\"noopener\">View &rarr;</a>" : "");
+      + (model.license_url ? " <span class=\"license-url\">" + esc(model.license_url) + "</span>" : "");
     $("det-summary").textContent = model.license_summary || "No license information available.";
     resetImportBtn();
-    // Only platforms that serve files without a login can be imported directly.
-    $("det-import-btn").style.display = model.importable ? "" : "none";
-    $("det-dl-btn").className = model.importable ? "secondary" : "";
-    var urlHtml = "";
-    if (model.url) urlHtml = "<strong>Open on " + esc(model.platform) + ":</strong> <a href=\"" + esc(model.url) + "\">" + esc(model.url) + "</a>";
-    $("det-url").innerHTML = urlHtml;
+    // Shown as plain text, never as a link: nothing in this panel may navigate the
+    // webview or reach the system browser.
+    $("det-url").textContent = model.url ? model.platform + ": " + model.url : "";
     $("detail").classList.add("active");
-  }
-
-  // Never navigate this webview: it has no popup support, so a platform login
-  // (Elegoo -> Google) dead-ends and the plugin UI is gone. Hand off to the
-  // system browser, where the user's sessions already live.
-  function openExternal(url) {
-    if (!url) return;
-    orca.postMessage({action:"open_external", url:url});
-    $("status").textContent = "Opening in your browser...";
-  }
-
-  function doDownload() {
-    if (!selectedModel) return;
-    openExternal(selectedModel.url || selectedModel.download_url);
   }
 
   function doImport() {
@@ -754,13 +908,6 @@ PAGE = r"""<!DOCTYPE html>
     btn.disabled = false;
     btn.textContent = "Import into OrcaSlicer";
   }
-
-  $("detail").addEventListener("click", function(e) {
-    var a = e.target.closest ? e.target.closest("a[href]") : null;
-    if (!a) return;
-    e.preventDefault();
-    openExternal(a.getAttribute("href"));
-  });
 
   function licenseClass(lic) {
     if (!lic) return "license-unk";
@@ -841,6 +988,7 @@ if orca is not None:
                     " for (var k = 0; k < window._results.length; k++) if (window._results[k].importable) { i = k; break; }"
                     " var c = i >= 0 ? document.querySelector('#results .card[data-idx=\"' + i + '\"]') : null;"
                     " jlog('AUTORUN importable idx=' + i + ' card=' + !!c); if (c) c.click(); }, 9000);"
+                    "setTimeout(function(){ jlog('AUTORUN import click'); doImport(); }, 12000);"
                     "\n</script>\n</body></html>")
 
             self.win = orca.host.ui.create_window(
@@ -865,9 +1013,6 @@ if orca is not None:
                 model = msg.get("model") or {}
                 if model:
                     threading.Thread(target=self._do_import, args=(model,), daemon=True).start()
-            elif action == "open_external":
-                threading.Thread(target=self._open_external, args=(msg.get("url", ""),),
-                                 daemon=True).start()
 
         def on_close(self):
             self.win = None
@@ -882,6 +1027,11 @@ if orca is not None:
                     continue
                 if not adapter.enabled({}):
                     continue
+                # A result the plugin cannot fetch is a dead end: the only action
+                # left for it would be the system browser, which this plugin no
+                # longer opens. So it is never shown.
+                if adapter.PLATFORM not in _FILE_RESOLVERS:
+                    continue
                 try:
                     results.extend(adapter.search(query, {}))
                 except Exception as e:
@@ -892,9 +1042,10 @@ if orca is not None:
             """Download the model's files and load them into the running plater."""
             resolver = _FILE_RESOLVERS.get(model.get("platform", ""))
             if resolver is None:
+                # Defensive only: _do_search filters these out before they reach the UI.
                 self._post({"action": "error", "message":
-                            "%s requires a login to download. Use 'Open in browser'."
-                            % model.get("platform", "This platform")})
+                            "%s does not serve files without a login, so it cannot be "
+                            "imported." % model.get("platform", "This platform")})
                 return
             try:
                 files = resolver(model.get("url", ""))
@@ -944,27 +1095,6 @@ if orca is not None:
                         if chunk:
                             fh.write(chunk)
             return path
-
-        def _open_external(self, url):
-            # No platform exposes a public direct-file URL, so the model page is the
-            # deliverable. It must open in the system browser: this webview has no
-            # popup support, so a platform login (Elegoo -> Google) dead-ends there.
-            if not url.startswith(("http://", "https://")):
-                self._post({"action": "error", "message": "Refusing to open non-http URL."})
-                return
-            try:
-                # Each desktop has its own opener; xdg-open is Linux-only.
-                if sys.platform == "darwin":
-                    subprocess.Popen(["open", url],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                elif os.name == "nt":
-                    os.startfile(url)  # noqa: S606 — Windows-only, absent elsewhere
-                else:
-                    subprocess.Popen(["xdg-open", url],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                self._post({"action": "opened", "url": url})
-            except Exception as e:
-                self._post({"action": "error", "message": f"Could not open browser: {e}"})
 
         def _post(self, msg):
             if self.win is not None and self.win.is_open():

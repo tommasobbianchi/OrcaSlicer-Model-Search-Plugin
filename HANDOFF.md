@@ -1,6 +1,6 @@
 # OrcaSlicer Model Search Plugin — Status
 
-**Updated**: 2026-08-09
+**Updated**: 2026-09-06 (v0.2.0)
 **Project**: `/home/tommaso/projects/Orca_plugin_Search_Engine/`
 **OrcaBelt instance**: behemoth, `--datadir /home/tommaso/.config/OrcaBelt2608-test`
 **Plugin path on behemoth**: `~/.config/OrcaBelt2608-test/orca_plugins/search_engine/search_engine.py`
@@ -10,19 +10,29 @@
 
 ## What works (verified in the running app, 2026-08-09)
 
-- **Search**: 4 adapters, ~126 results for "benchy". All public APIs, no auth.
+- **Search**: Printables only, 30 results for "benchy". Public API, no auth.
 - **Thumbnails**: load fine (cross-origin images from a `file://` origin are not blocked).
 - **Card clicks**: delegated listener on `#results`, detail panel opens as a fixed overlay.
 - **Import into OrcaSlicer**: Printables model → STL downloaded → **lands in Prepare**.
   Verified: `3dbenchy.stl`, 60.001 × 31.004 × 48 mm, 225154 triangles, on the plate.
-- **Open in browser**: hands the model page to the system browser via `xdg-open`.
+## v0.2.0 — the two guard rails
 
-| Platform | Results | Search API | File download |
-|----------|---------|-----------|---------------|
-| MakerWorld (Bambu) | 30 | `api.bambulab.com/v1/search-service/select/design2` | ❌ `{"error":"Please log in to download models."}` |
-| Nexprint (Elegoo) | 30 | `nexprint.com/gateway/api/v1/model-library-server/model-base-info/search` | ❌ 401 账号未登录 on every `model-file/*` endpoint |
-| Makeronline (Anycubic) | 30 | `POST makeronline.com/api/search/model` | ❌ `files[].url` is 403 (private S3) |
-| **Printables (Prusa)** | 30 | `searchPrints2` GraphQL query | ✅ **public, no auth** |
+1. **No external browser, ever.** `xdg-open` / `open` / `os.startfile` are gone, the
+   "Open in browser" button is gone, and nothing in the panel is an `<a href>`: URLs are
+   rendered as text so they can neither navigate the webview nor reach a browser.
+2. **Everything offered lands in Prepare.** `_do_search` skips any adapter whose
+   `PLATFORM` has no `_FILE_RESOLVERS` entry, so a result the plugin cannot fetch is never
+   shown. That is why only Printables is listed.
+
+The three gated adapters stay in the source, dormant. Re-checked 2026-09-06, all still
+gated — this is not stale inherited knowledge:
+
+| Platform | Search API | File download |
+|----------|-----------|---------------|
+| MakerWorld (Bambu) | `api.bambulab.com/v1/search-service/select/design2` | ❌ `/instance/<id>/f3mf` → 403 `Please log in to download models.` |
+| Nexprint (Elegoo) | `nexprint.com/gateway/api/v1/model-library-server/model-base-info/search` | ❌ detail returns `file_url: ""` without a session |
+| Makeronline (Anycubic) | `POST makeronline.com/api/search/model` | ❌ `files[].url` → 403 AccessDenied (private S3) |
+| **Printables (Prusa)** | `searchPrints2` GraphQL query | ✅ **public, no auth** |
 
 Disabled: Thingiverse (`/download:ID` → 403 robots), GrabCAD (API retired).
 
@@ -37,7 +47,7 @@ filePreviewPath: media/prints/3161/stls/123914_<uuid>/3dbenchy_preview.png
    HTTP 200, application/sla, 11285384 bytes, magic "solid Shape0"
 ```
 
-### How the file reaches Prepare
+### How the file reaches Prepare (all three OSes)
 The plugin host API is **read-only** — `orca.host.model/mesh/presets/slicing` only
 inspect; there is no import/add-object binding. But every running instance listens on
 the session bus for the message a second launch would send
@@ -50,8 +60,32 @@ the session bus for the message a second launch would send
 The string is an argv list in `unescape_strings_cstyle` format — **semicolon-separated,
 quoted** (`"orca-slicer";"/path/file.stl"`), *not* space-separated. `argv[0]` is skipped
 as the executable path. File paths there reach `EVT_LOAD_MODEL_OTHER_INSTANCE`, i.e. the
-plater, and Orca switches to Prepare on its own. `_load_in_orca()` discovers the instance
-hash from `ListNames`, so it needs no configuration.
+plater, and Orca switches to Prepare on its own. `_load_in_orca_dbus()` discovers the
+instance hash from `ListNames`, so it needs no configuration.
+
+**D-Bus is Linux-only**, so `_load_in_orca()` dispatches on the OS:
+
+| OS | Transport | Receiver |
+|----|-----------|----------|
+| Linux | `dbus-send` `AnotherInstance` | `InstanceCheck.cpp` D-Bus listener |
+| Windows | `SendMessageW(hwnd, WM_COPYDATA, …)`, `dwData = 1` | `GUI_App.cpp:675` `MSWRegisterMessageHandler` → `handle_message()` |
+| macOS | `open -a <bundle> <file>` | `GUI_App::MacOpenFiles` (`GUI_App.cpp:9002`) |
+
+On Windows the plugin runs **inside** the target process, so the main frame is found by
+`EnumWindows` filtered on class `wxWindowNR` + both `Instance_Hash_*` props + our own PID —
+no instance hash needs computing. On macOS, `open -a` delivers an "open documents" Apple
+Event to the running instance; `MacOpenFiles` only spawns a second slicer for `.3mf`, and
+models arrive as `.stl`/`.step`.
+
+**Rejected: relaunching with `--single-instance`.** It looks like the obvious portable
+answer — `process_command_line()` does set `should_send = true` on that token — but the
+`single_instance` CLI option is commented out in `PrintConfig.cpp:12394`, so `setup()`
+rejects the argument and the process dies with `setup params error`, exit 254. Measured on
+the belt-2026-08 build, 2026-09-06. Without the flag the hand-off depends on the user's
+`single_instance` preference, which is `false` by default.
+
+**Only the Linux transport has been exercised on real hardware.** Windows and macOS are
+derived from the receiving code, not observed.
 
 ---
 

@@ -1,40 +1,52 @@
 # 3D Model Search Engine for OrcaSlicer
 
-Search MakerWorld, Nexprint, Makeronline and Printables from inside OrcaSlicer, and
-load a model straight onto the plate.
+Search for 3D models from inside OrcaSlicer and load one straight onto the plate.
 
 A Python plugin for OrcaSlicer's plugin system. The licence of every result is shown
-before anything is downloaded.
+before anything is downloaded, and the plugin never opens an external browser.
 
 ## Status
 
-**v0.1.0 — early.** Search works on all four platforms. **Import works on Printables
-only** — see the table below; that is not a missing feature, it is where the files are
-reachable without a login.
+**v0.2.0.** Two rules govern the plugin, and everything else follows from them:
 
-| Platform | Search | Import | Why |
-|---|---|---|---|
-| **Printables** (Prusa) | yes | **yes** | files are public |
-| MakerWorld (Bambu Lab) | yes | no | `Please log in to download models` |
-| Nexprint (Elegoo) | yes | no | 401 on every file endpoint |
-| Makeronline (Anycubic) | yes | no | file URLs are a private S3 bucket, 403 |
+1. **It never opens a web browser.** No `xdg-open`, no `open`, no `ShellExecute`. Every
+   URL in the interface is text you can read, not a link that navigates anywhere.
+2. **Every model it offers lands in Prepare.** The file is downloaded by the plugin and
+   handed to the running OrcaSlicer.
 
-Thingiverse and GrabCAD are disabled: Thingiverse's developer portal was removed in the
-2025 site migration so new app tokens cannot be obtained, and GrabCAD's public API is
-retired.
+That is why only Printables is listed. A platform is offered only if its files can be
+fetched without a login, because anything else could be honoured only by sending you to
+a browser — which rule 1 forbids.
+
+| Platform | Offered | Why |
+|---|---|---|
+| **Printables** (Prusa) | **yes** | files are public; import works |
+| MakerWorld (Bambu Lab) | no | `Please log in to download models` (403, re-checked 2026-09-06) |
+| Nexprint (Elegoo) | no | detail returns an empty `file_url` without a session |
+| Makeronline (Anycubic) | no | file URLs are a private S3 bucket, 403 AccessDenied |
+| Thingiverse (UltiMaker) | no | developer portal removed in the 2025 migration, no new tokens |
+| GrabCAD (Stratasys) | no | public API retired |
+
+The adapters for the login-gated platforms are still in the source. They come back the
+day their files can be fetched in-app — adding a `_FILE_RESOLVERS` entry is all it takes.
 
 ## Using it
 
-1. **Search** by keyword. Results come from all four platforms at once.
+1. **Search** by keyword.
 2. **Click a result** — the detail panel shows the licence, its plain-English summary,
-   and a link to the full terms.
+   and the URL of the full terms as text.
 3. **Import** — the model is downloaded and dropped onto the plate; Orca switches to
-   Prepare on its own. Or **Open in browser** to go to the model's page.
+   Prepare on its own. It is the only button, and it is the only thing the plugin does.
 
-The licence is on screen before either button can be pressed — the detail panel is the
-only route to them — and a notice beside it states that complying with the licence is
-the user's own responsibility. Nothing is cached, re-hosted or redistributed, and the
+The licence is on screen before Import can be pressed — the detail panel is the only
+route to it — and a notice beside it states that complying with the licence is the
+user's own responsibility. Nothing is cached, re-hosted or redistributed, and the
 plugin collects no data of any kind.
+
+Files reach the plate through the same channel a second launch would use: the session
+bus on Linux, `WM_COPYDATA` on Windows, and an "open documents" Apple Event (`open -a`)
+on macOS. Only the Linux path has been run on real hardware; the other two are written
+against Orca's own receiving code.
 
 ## Install
 

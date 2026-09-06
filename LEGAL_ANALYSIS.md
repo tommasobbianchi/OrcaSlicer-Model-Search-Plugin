@@ -2,10 +2,15 @@
 
 ## Executive Summary
 
-4 adapters all use **publicly accessible endpoints** (no auth, no access control bypass).
-All platforms serve search results and license metadata from public URLs that the platform's
-own web frontend calls. We access the same public data at reasonable rates, with the
-license and a responsibility notice displayed before download. Risk: LOW.
+As of v0.2.0 the plugin offers **one platform, Printables**, over **publicly accessible
+endpoints** (no auth, no access control bypass). Search results and license metadata come
+from the same public URLs the platform's own web frontend calls, at reasonable rates, with
+the license and a responsibility notice displayed before download. Risk: LOW.
+
+The three login-gated platforms (MakerWorld, Nexprint, Makeronline) are no longer offered.
+Their adapters used to end in a hand-off to the system browser; v0.2.0 opens no browser at
+all, so a platform whose files cannot be fetched in-app has no route left and is not shown.
+Their analysis below is retained for the day their files become reachable.
 
 Core safeguards implemented:
 1. License metadata displayed BEFORE download (non-negotiable)
@@ -13,6 +18,7 @@ Core safeguards implemented:
 3. No caching, redistribution, or re-hosting of model files
 4. Responsibility notice shown with the license on every model
 5. No data collection or telemetry
+6. No external browser is ever launched, and no URL in the interface is a link
 
 Downloading is the user's own act, under the user's own platform account. See
 [User Responsibility](#user-responsibility).
@@ -21,7 +27,7 @@ Downloading is the user's own act, under the user's own platform account. See
 
 ## Platform-by-Platform Analysis
 
-### 1. MakerWorld (Bambu Lab) — `api.bambulab.com`
+### 1. MakerWorld (Bambu Lab) — `api.bambulab.com` — **not offered in v0.2.0**
 
 | Aspect | Detail |
 |--------|--------|
@@ -32,7 +38,7 @@ Downloading is the user's own act, under the user's own platform account. See
 | Access method | Same API called by makerworld.com frontend. Public CDN endpoint. |
 | ToS risk | **LOW** — public endpoint, no auth bypass, no scraping. |
 
-### 2. Nexprint (Elegoo) — `nexprint.com`
+### 2. Nexprint (Elegoo) — `nexprint.com` — **not offered in v0.2.0**
 
 | Aspect | Detail |
 |--------|--------|
@@ -43,7 +49,7 @@ Downloading is the user's own act, under the user's own platform account. See
 | Access method | Public REST gateway. Same API called by nexprint.com frontend. |
 | ToS risk | **LOW** — public gateway endpoint, no auth bypass. |
 
-### 3. Makeronline (Anycubic) — `makeronline.com`
+### 3. Makeronline (Anycubic) — `makeronline.com` — **not offered in v0.2.0**
 
 | Aspect | Detail |
 |--------|--------|
@@ -175,9 +181,9 @@ Nothing in this document is legal advice.
 
 1. **License display** — every result shows the license name, its plain-English summary,
    and a link to the full terms
-2. **License shown before download** — the detail panel is the only route to the import and
-   download buttons, so the license and the responsibility notice below it are on screen
-   before either can be pressed
+2. **License shown before download** — the detail panel is the only route to the import
+   button, so the license and the responsibility notice below it are on screen before it
+   can be pressed
 3. **Responsibility notice** — stated in the detail panel, next to the license, on every
    model
 4. **No caching** — downloads go to the plugin's local directory only
@@ -194,6 +200,7 @@ Nothing in this document is legal advice.
 |------|----------|------------|--------|
 | User downloads ARR model without attribution | HIGH | License and responsibility notice displayed before download | Implemented |
 | Platform ToS violation (scraping) | MEDIUM | Public APIs only — no HTML scraping anywhere; no auth bypass; reasonable rates | Implemented |
+| Login-gated files fetched without a right to them | MEDIUM | Platforms that gate their files are not offered at all; there is no login, no cookie reuse and no browser hand-off | Implemented |
 | Mass copyright infringement | MEDIUM | No bulk download; license shown first; liability disclaimer | Implemented |
 | Anti-bot blocking | LOW | Rate limiting; user-agent header | Implemented |
 | GDPR violation | LOW | No data collection | Verified |
