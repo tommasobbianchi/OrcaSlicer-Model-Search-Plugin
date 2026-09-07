@@ -1,6 +1,6 @@
 # OrcaSlicer Model Search Plugin — Status
 
-**Updated**: 2026-09-07 (v0.2.2, live on the hub)
+**Updated**: 2026-09-07 (v0.2.2, live on the hub; releases now publish from GitHub)
 **Project**: `/home/tommaso/projects/Orca_plugin_Search_Engine/`
 **OrcaBelt instance**: behemoth, `--datadir /home/tommaso/.config/OrcaBelt2608-test`
 **Plugin path on behemoth**: `~/.config/OrcaBelt2608-test/orca_plugins/search_engine/search_engine.py`
@@ -159,29 +159,39 @@ Screenshots: `scrot` returns black under Xwayland; capture the window instead �
 
 ## Next
 
-0. **Published as v0.2.2 on 2026-09-07** (hub listing `3e89402d-6dfb-4520-a210-b5eec04eb34a`,
-   588 subscribers). Seven platform-suffixed copies of `search_engine.py`, the rewritten
-   description, the changelog and the tags are live. **0.2.1 is a burned release number** —
-   it was saved with the old 0.1.1 files still attached; 0.2.2 is the first release that
-   carries this code.
+0. **Releasing is automated — do not upload by hand again.** The listing
+   (`3e89402d-6dfb-4520-a210-b5eec04eb34a`, 588 subscribers) is connected under
+   Edit plugin ▸ GitHub publishing to `tommasobbianchi/orcaslicer-model-search-plugin`,
+   and `.github/workflows/publish-orcacloud.yml` publishes on every GitHub release.
+   Documented at `https://cloud.orcaslicer.com/wiki/#publish-from-github`.
 
-   How the upload actually works, because none of it is obvious:
+   To ship a version: bump the PEP 723 `version`, push, then create a release
+   whose tag is `v<that same version>` and higher than the live one. The tag
+   becomes the plugin version and the release notes become the changelog; the
+   workflow fans the single `search_engine.py` out to the seven target-suffixed
+   names the hub keeps one entry per, and refuses to run if the tag and the
+   header disagree. Authentication is GitHub's OIDC token, `audience=orcacloud`
+   — there is no secret in the repo, and connecting gives Orca Cloud no access
+   to it. A `401` means the repository is not connected to exactly one of your
+   plugins; re-running a successful release is safe and fails harmlessly.
 
-   - The hub has no publish API (`OrcaCloudServiceAgent` is consume-only). It is the web form
-     at cloud.orcaslicer.com ▸ Plugins ▸ the plugin ▸ **Edit plugin**, signed in to OrcaCloud.
-   - **A release is created from the VERSION field, so changing the files without bumping the
-     version fails silently** — the dialog simply stays open, with no error and no network
-     request. Bump the PEP 723 header, push, and upload that.
-   - The form **ignores a file whose name matches one already attached**. Remove all seven
-     current entries first, then add the seven new ones.
-   - `.py` files must carry a target suffix (`_linux_x86_64`, `_macosx_universal`, …); the
-     listing keeps one entry per target.
-   - Uploading through the browser's own file chooser is not automatable here: the GNOME
-     portal dialog is invisible to X11 tooling and CDP's `DOM.setFileInputFiles` never reaches
-     this dropzone. What works is `Page.setBypassCSP` + reload, then `fetch()` the file from a
-     **commit-pinned** raw.githubusercontent URL inside the page, build `File` objects, assign
-     them to the dropzone's `input.files` and dispatch `change`. A branch URL is not enough —
-     raw.githubusercontent served the previous commit's body for several minutes.
+   **0.2.1 is a burned release number** — it was saved with the old 0.1.1 files
+   still attached; 0.2.2 was the first release carrying this code, and it was
+   the last one uploaded through the browser. The manual form is still there and
+   still carries all three traps below, so use it only if the workflow is down:
+
+   - A release is created from the VERSION field, so changing the files without
+     bumping the version fails silently — the dialog stays open, no error, no
+     network request.
+   - The form ignores a file whose name matches one already attached. Remove all
+     seven current entries first.
+   - The browser's own file chooser cannot be automated here: the GNOME portal
+     dialog is invisible to X11 tooling and CDP's `DOM.setFileInputFiles` never
+     reaches this dropzone. What worked was `Page.setBypassCSP` + reload, then
+     `fetch()`ing the file inside the page from a **commit-pinned**
+     raw.githubusercontent URL and building `File` objects. A branch URL is not
+     enough — raw.githubusercontent served the previous commit's body for
+     several minutes, which is what produced the burned release.
 
 1. **More importable platforms** — all three others gate files behind a login. Options:
    reuse the browser session's cookies, or add per-platform auth. Nothing else is scrapeable.
