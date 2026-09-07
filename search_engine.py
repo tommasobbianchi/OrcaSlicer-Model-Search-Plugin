@@ -6,7 +6,7 @@
 # name = "3D Model Search Engine"
 # description = "Search 3D models from inside OrcaSlicer and load them straight onto the plate. Only platforms whose files can be fetched without leaving the app are offered, and the licence is always shown before the download. No external browser is ever opened."
 # author = "Tommaso Bianchi"
-# version = "0.2.1"
+# version = "0.2.2"
 # ///
 
 try:
