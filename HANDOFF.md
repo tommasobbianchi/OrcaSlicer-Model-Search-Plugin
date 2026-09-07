@@ -1,6 +1,6 @@
 # OrcaSlicer Model Search Plugin — Status
 
-**Updated**: 2026-09-06 (v0.2.0)
+**Updated**: 2026-09-07 (v0.2.2, live on the hub)
 **Project**: `/home/tommaso/projects/Orca_plugin_Search_Engine/`
 **OrcaBelt instance**: behemoth, `--datadir /home/tommaso/.config/OrcaBelt2608-test`
 **Plugin path on behemoth**: `~/.config/OrcaBelt2608-test/orca_plugins/search_engine/search_engine.py`
@@ -159,11 +159,30 @@ Screenshots: `scrot` returns black under Xwayland; capture the window instead �
 
 ## Next
 
-0. **Publish v0.2.0 to the hub.** The hub does not sync from GitHub, so a push changes
-   nothing for its users: the eight platform-suffixed `.py` files staged in
-   `behemoth:~/Scaricati/` have to be uploaded by hand at cloud.orcaslicer.com while
-   signed in to OrcaCloud (the client has no publish API). All eight currently match
-   HEAD, md5 `a2cda089fe59ee263522e22bf6279d72`.
+0. **Published as v0.2.2 on 2026-09-07** (hub listing `3e89402d-6dfb-4520-a210-b5eec04eb34a`,
+   588 subscribers). Seven platform-suffixed copies of `search_engine.py`, the rewritten
+   description, the changelog and the tags are live. **0.2.1 is a burned release number** —
+   it was saved with the old 0.1.1 files still attached; 0.2.2 is the first release that
+   carries this code.
+
+   How the upload actually works, because none of it is obvious:
+
+   - The hub has no publish API (`OrcaCloudServiceAgent` is consume-only). It is the web form
+     at cloud.orcaslicer.com ▸ Plugins ▸ the plugin ▸ **Edit plugin**, signed in to OrcaCloud.
+   - **A release is created from the VERSION field, so changing the files without bumping the
+     version fails silently** — the dialog simply stays open, with no error and no network
+     request. Bump the PEP 723 header, push, and upload that.
+   - The form **ignores a file whose name matches one already attached**. Remove all seven
+     current entries first, then add the seven new ones.
+   - `.py` files must carry a target suffix (`_linux_x86_64`, `_macosx_universal`, …); the
+     listing keeps one entry per target.
+   - Uploading through the browser's own file chooser is not automatable here: the GNOME
+     portal dialog is invisible to X11 tooling and CDP's `DOM.setFileInputFiles` never reaches
+     this dropzone. What works is `Page.setBypassCSP` + reload, then `fetch()` the file from a
+     **commit-pinned** raw.githubusercontent URL inside the page, build `File` objects, assign
+     them to the dropzone's `input.files` and dispatch `change`. A branch URL is not enough —
+     raw.githubusercontent served the previous commit's body for several minutes.
+
 1. **More importable platforms** — all three others gate files behind a login. Options:
    reuse the browser session's cookies, or add per-platform auth. Nothing else is scrapeable.
 2. **Multi-file prints — done.** A print with more than one file now stops at a picker:
