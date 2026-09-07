@@ -1,0 +1,69 @@
+# Publishing a GitHub release here replaces the manual browser upload described
+# in HANDOFF.md. The hub identifies the run by an OIDC token GitHub signs, so
+# there is no token or secret in this repository. Requires the repository to be
+# connected under Edit plugin > GitHub publishing on cloud.orcaslicer.com.
+name: Publish to OrcaCloud
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The hub takes the version from the tag, not from the file. Publishing a
+      # release whose files disagree with it is what burned 0.2.1, so refuse the
+      # mismatch instead of shipping the wrong code under a new version number.
+      - name: Check the tag matches the PEP 723 version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          header="$(sed -n 's/^# version = "\(.*\)"$/\1/p' search_engine.py | head -1)"
+          echo "tag=$tag header=$header"
+          [ "$tag" = "$header" ]
+
+      # One plugin, one file, but the hub keeps a separate entry per target
+      # suffix and derives "Supported OS" from them.
+      - name: Fan the plugin out to the seven targets
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for t in linux_x86_64 linux_arm64 win_x86_64 win_arm64 \
+                   macosx_x86_64 macosx_arm64 macosx_universal; do
+            cp search_engine.py "dist/search_engine_$t.py"
+          done
+
+      - name: Publish release to OrcaCloud
+        env:
+          PLUGIN_FILES: "dist/search_engine_*.py"
+        run: |
+          set -euo pipefail
+          oidc_token="$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=orcacloud" | jq -r .value)"
+          version="${GITHUB_REF_NAME#v}"
+          changelog="$(jq -r '.release.body // ""' "$GITHUB_EVENT_PATH" | head -c 4000)"
+          metadata="$(jq -cn --arg version "$version" --arg changelog "$changelog" \
+            '{version: $version} + (if $changelog == "" then {} else {changelog: $changelog} end)')"
+          args=(-F "metadata=$metadata")
+          shopt -s nullglob
+          for file in $PLUGIN_FILES; do
+            args+=(-F "files=@$file")
+          done
+          if [ "${#args[@]}" -eq 1 ]; then
+            echo "No plugin files matched: $PLUGIN_FILES" >&2
+            exit 1
+          fi
+          status="$(curl -sS -o response.json -w '%{http_code}' \
+            -H "Authorization: Bearer $oidc_token" \
+            "${args[@]}" \
+            https://api.orcaslicer.com/api/v1/plugin-publish/releases)"
+          cat response.json
+          echo
+          [ "$status" = "201" ]
