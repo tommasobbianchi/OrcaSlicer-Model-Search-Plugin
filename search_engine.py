@@ -6,7 +6,7 @@
 # name = "3D Model Search Engine"
 # description = "Search 3D models from inside OrcaSlicer and load them straight onto the plate. Searching covers every listed platform, while importing onto the plate is only possible where the platform serves files without a login (today Printables), and the licence is always shown before the download. No external browser is ever opened."
 # author = "Tommaso Bianchi"
-# version = "0.2.2"
+# version = "0.2.3"
 # ///
 
 try:
