@@ -4,7 +4,7 @@
 #
 # [tool.orcaslicer.plugin]
 # name = "3D Model Search Engine"
-# description = "Search 3D models from inside OrcaSlicer and load them straight onto the plate. Only platforms whose files can be fetched without leaving the app are offered, and the licence is always shown before the download. No external browser is ever opened."
+# description = "Search 3D models from inside OrcaSlicer and load them straight onto the plate. Searching covers every listed platform, while importing onto the plate is only possible where the platform serves files without a login (today Printables), and the licence is always shown before the download. No external browser is ever opened."
 # author = "Tommaso Bianchi"
 # version = "0.2.2"
 # ///
@@ -878,10 +878,16 @@ PAGE = r"""<!DOCTYPE html>
   <button id="search-btn" onclick="doSearch()">Search</button>
 </div>
 <div class="platforms">
-  <!-- Only platforms with an entry in _FILE_RESOLVERS belong here. Everything listed
-       must import onto the plate; a result the plugin cannot fetch has no route left,
-       because handing it to the system browser is no longer permitted. -->
+  <!-- All four searchable platforms are offered ticked by default. Thingiverse
+       and GrabCAD are shown disabled with the short reason, so the window does
+       not pretend they do not exist. Importing onto the plate is only possible
+       where the platform serves files without a login (today Printables). -->
   <label><input type="checkbox" checked data-platform="printables"> Printables</label>
+  <label><input type="checkbox" checked data-platform="makerworld"> MakerWorld</label>
+  <label><input type="checkbox" checked data-platform="nexprint"> Nexprint</label>
+  <label><input type="checkbox" checked data-platform="makeronline"> Makeronline</label>
+  <label><input type="checkbox" disabled data-platform="thingiverse"> Thingiverse (API token needed)</label>
+  <label><input type="checkbox" disabled data-platform="grabcad"> GrabCAD (API retired)</label>
 </div>
 <div id="results"></div>
 <div id="detail" class="detail-panel">
@@ -1166,11 +1172,8 @@ if orca is not None:
                     continue
                 if not adapter.enabled({}):
                     continue
-                # A result the plugin cannot fetch is a dead end: the only action
-                # left for it would be the system browser, which this plugin no
-                # longer opens. So it is never shown.
-                if adapter.PLATFORM not in _FILE_RESOLVERS:
-                    continue
+                # Searching covers every listed platform; only the import step
+                # needs an entry in _FILE_RESOLVERS.
                 try:
                     results.extend(adapter.search(query, {}))
                 except Exception as e:
