@@ -1166,13 +1166,11 @@ if orca is not None:
                     continue
                 if not adapter.enabled({}):
                     continue
-                # A result the plugin cannot fetch is a dead end: the only action
-                # left for it would be the system browser, which this plugin no
-                # longer opens. So it is never shown.
-                if adapter.PLATFORM not in _FILE_RESOLVERS:
-                    continue
                 try:
-                    results.extend(adapter.search(query, {}))
+                    found = adapter.search(query, {})
+                    for r in found:
+                        r["importable"] = r.get("platform", "") in _FILE_RESOLVERS
+                    results.extend(found)
                 except Exception as e:
                     # Posting the error here used to be pointless: the results
                     # message below arrived straight after and overwrote the
