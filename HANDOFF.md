@@ -1,6 +1,6 @@
 # OrcaSlicer Model Search Plugin — Status
 
-**Updated**: 2026-09-07 (v0.2.2, live on the hub; releases now publish from GitHub)
+**Updated**: 2026-09-20 (v0.3.0 in the repo, unreleased; the hub still serves 0.2.2)
 **Project**: `/home/tommaso/projects/Orca_plugin_Search_Engine/`
 **OrcaBelt instance**: behemoth, `--datadir /home/tommaso/.config/OrcaBelt2608-test`
 **Plugin path on behemoth**: `~/.config/OrcaBelt2608-test/orca_plugins/search_engine/search_engine.py`
@@ -24,12 +24,13 @@
    `PLATFORM` has no `_FILE_RESOLVERS` entry, so a result the plugin cannot fetch is never
    shown. That is why only Printables is listed.
 
-The three gated adapters stay in the source, dormant. Re-checked 2026-09-06, all still
-gated — this is not stale inherited knowledge:
+Nexprint and Makeronline stay in the source, searchable but not importable. MakerWorld
+became importable on 2026-09-20 once the right endpoint was found — the earlier "403, please
+log in" was the *wrong endpoint*, not a wall. Re-checked 2026-09-06 for the other two:
 
 | Platform | Search API | File download |
 |----------|-----------|---------------|
-| MakerWorld (Bambu) | `api.bambulab.com/v1/search-service/select/design2` | ❌ `/instance/<id>/f3mf` → 403 `Please log in to download models.` |
+| **MakerWorld (Bambu)** | `api.bambulab.com/v1/search-service/select/design2` | ✅ **with the user's own Bambu Cloud token** (see below) |
 | Nexprint (Elegoo) | `nexprint.com/gateway/api/v1/model-library-server/model-base-info/search` | ❌ detail returns `file_url: ""` without a session |
 | Makeronline (Anycubic) | `POST makeronline.com/api/search/model` | ❌ `files[].url` → 403 AccessDenied (private S3) |
 | **Printables (Prusa)** | `searchPrints2` GraphQL query | ✅ **public, no auth** |
@@ -56,6 +57,37 @@ is an old-layout print, which is why every test passed while real models did not
 
 Verified 2026-09-06 against both layouts: Flexi Capy Snek (1041594), 14 files, first is
 HTTP 200 `model/stl` 4307484 bytes; 3D Benchy (3161) still HTTP 200, 11285384 bytes.
+
+### How the MakerWorld download works
+Three calls, the first two anonymous:
+
+```
+GET api.bambulab.com/v1/design-service/design/<designId>            -> modelId   (alphanumeric)
+GET api.bambulab.com/v1/design-service/design/<designId>/instances  -> hits[].profileId
+GET api.bambulab.com/v1/iot-service/api/user/profile/<profileId>?model_id=<modelId>
+    Authorization: Bearer <Bambu Cloud token>                       -> {"url": signed CDN URL}
+```
+
+`modelId` is **not** the integer in the `/models/<N>` URL — that is the designId, and the
+download rejects it. The signed URL lives about five minutes.
+
+**The token is the user's own, and the plugin never goes looking for one.** It is read from
+the capability's config, which the *host* stores (`<datadir>/orca_plugins/config.json`) and
+hands back through `self.get_config()` — a JSON string, so `json.loads` it. `get_config()`
+only works on the instance the host built; a hand-constructed one raises "only available on a
+capability loaded by the plugin host", which is what the debug autorun hits. `get_default_config()`
+seeds the Config tab's JSON editor with `{"makerworld_token": ""}` so the key names itself.
+
+Reading OrcaSlicer's *own* Bambu login is not an option and should not be attempted:
+`PluginAuditManager::default_denied_filenames()` blocks `OrcaSlicer.conf/.ini` and
+`orca_refresh_token.sec` to plugins, and the comment in `is_denied_filename` names symlink and
+subprocess laundering as evasion. Bambu has no third-party OAuth either (password plus an
+emailed 6-digit code), so a pasted token is both the only route and the most defensible one.
+
+**Listing mints nothing.** A design can carry dozens of profiles — Benchy Bambu PLA Basic has
+91, measured 2026-09-20 — so `get_files` returns names with an empty `url`, and `mint_url`
+runs only for the entries the user ticked. The picker also stops pre-ticking above 8 files,
+because 91 pre-ticked plates turn one press into 91 downloads.
 
 ### How the file reaches Prepare (all three OSes)
 The plugin host API is **read-only** — `orca.host.model/mesh/presets/slicing` only
@@ -193,8 +225,14 @@ Screenshots: `scrot` returns black under Xwayland; capture the window instead �
      enough — raw.githubusercontent served the previous commit's body for
      several minutes, which is what produced the burned release.
 
-1. **More importable platforms** — all three others gate files behind a login. Options:
-   reuse the browser session's cookies, or add per-platform auth. Nothing else is scrapeable.
+1. **More importable platforms** — MakerWorld is done (v0.3.0). Nexprint and Makeronline
+   still gate files and have no known token route; both are searchable, and their results say
+   so on the panel rather than offering a dead button. Before assuming either is walled, check
+   whether the wall is really the wrong endpoint — that is all MakerWorld's 403 ever was.
+
+   **Not verified: an authorized 200 from the MakerWorld download.** Everything up to it is
+   (91 profiles listed live, an invalid token gets the intended 401 message), but the final
+   fetch needs a real Bambu account.
 2. **Multi-file prints — done.** A print with more than one file now stops at a picker:
    the resolver's list comes back to the panel as a checkbox per file (All / None
    buttons, all ticked), and only the ticked ones are downloaded. A single-file print
