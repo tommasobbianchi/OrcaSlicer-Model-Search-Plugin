@@ -4,9 +4,9 @@
 #
 # [tool.orcaslicer.plugin]
 # name = "3D Model Search Engine"
-# description = "Search 3D models from inside OrcaSlicer and load them straight onto the plate. Searching covers every listed platform, while importing onto the plate is only possible where the platform serves files without a login (today Printables), and the licence is always shown before the download. No external browser is ever opened."
+# description = "Search 3D models from inside OrcaSlicer and load them straight onto the plate. Printables needs nothing; MakerWorld imports with your own account token, pasted into the plugin's config. The licence is always shown before the download, and no external browser is ever opened."
 # author = "Tommaso Bianchi"
-# version = "0.2.2"
+# version = "0.3.0"
 # ///
 
 try:
@@ -560,7 +560,6 @@ class PrintablesSearcher:
                 "license_summary": lic_data["summary"],
                 "download_url": f"https://www.printables.com/model/{item.get('id','')}-{item.get('slug','')}",
                 "url": f"https://www.printables.com/model/{item.get('id','')}-{item.get('slug','')}",
-                "importable": True,
             })
         return results
 
@@ -579,8 +578,11 @@ class PrintablesSearcher:
     )
 
     @staticmethod
-    def get_files(model_url):
-        """Public STL URLs for a print, one getDownloadLink call per file."""
+    def get_files(model_url, tokens=None):
+        """Public STL URLs for a print, one getDownloadLink call per file.
+
+        Takes `tokens` only to match the resolver signature; Printables needs none.
+        """
         import requests
 
         m = re.search(r"/model/(\d+)", model_url or "")
@@ -665,6 +667,15 @@ class MakerWorldSearcher:
 
     SEARCH_URL = "https://api.bambulab.com/v1/search-service/select/design2"
     BASE = "https://makerworld.com"
+    DESIGN_URL = "https://api.bambulab.com/v1/design-service/design/%s"
+    INSTANCES_URL = "https://api.bambulab.com/v1/design-service/design/%s/instances"
+    # The download the site performs for itself, on the api.bambulab.com backend
+    # rather than on Cloudflare-protected makerworld.com. It takes the same
+    # bearer the user already signs in with and mints the signed CDN URL the
+    # browser would otherwise obtain from its session cookies. The old
+    # /instance/<id>/f3mf shape is dead, which is why this platform looked like
+    # a hard login wall when it was really the wrong endpoint.
+    PROFILE_DOWNLOAD_URL = "https://api.bambulab.com/v1/iot-service/api/user/profile/%s"
 
     @staticmethod
     def enabled(tokens):
@@ -736,6 +747,85 @@ class MakerWorldSearcher:
             "images": [p.get("url", "") for p in pics],
         }
 
+    @staticmethod
+    def _headers():
+        return {"User-Agent": _BROWSER_UA, "Referer": MakerWorldSearcher.BASE + "/"}
+
+    @staticmethod
+    def get_files(model_url, tokens=None):
+        """The design's print profiles, one per plate, with no URL yet.
+
+        Both calls here are anonymous; the token is checked up front only so a
+        user without one is told what to do before two pointless requests.
+
+        The URLs are deliberately NOT minted here. A popular design carries
+        dozens of profiles (Benchy Bambu PLA Basic: 91, measured 2026-09-20) and
+        a signed URL lives about five minutes, so minting at list time would fire
+        one authenticated call per profile and most would expire before the user
+        finished choosing. `mint_url` runs for the picked entries only.
+        """
+        import requests
+
+        token = ((tokens or {}).get("makerworld_token") or "").strip()
+        if not token:
+            raise RuntimeError(
+                "MakerWorld serves files only to an account. Paste your own Bambu "
+                "Cloud token into Plugins > 3D Model Search > Config, under "
+                '"makerworld_token".')
+        m = re.search(r"/models/(\d+)", model_url or "")
+        if not m:
+            return []
+        design_id = m.group(1)
+        headers = MakerWorldSearcher._headers()
+
+        # model_id is MakerWorld's alphanumeric id (e.g. US2262720d55a8f6), NOT
+        # the integer designId in the /models/<N> URL: the download rejects the
+        # latter.
+        d = requests.get(MakerWorldSearcher.DESIGN_URL % design_id,
+                         headers=headers, timeout=30)
+        d.raise_for_status()
+        model_id = (d.json() or {}).get("modelId") or ""
+
+        i = requests.get(MakerWorldSearcher.INSTANCES_URL % design_id,
+                         headers=headers, timeout=30)
+        i.raise_for_status()
+
+        files = []
+        for hit in (i.json() or {}).get("hits") or []:
+            profile_id = hit.get("profileId")
+            if not profile_id:
+                continue
+            files.append({
+                "name": (hit.get("title") or ("profile-%s" % profile_id)) + ".3mf",
+                "url": "",
+                "_profile_id": profile_id,
+                "_model_id": model_id,
+            })
+        return files
+
+    @staticmethod
+    def mint_url(entry, tokens=None):
+        """Turn one picked profile into a signed CDN URL, valid for minutes."""
+        import requests
+
+        token = ((tokens or {}).get("makerworld_token") or "").strip()
+        if not token:
+            raise RuntimeError("MakerWorld needs your Bambu Cloud token.")
+        headers = dict(MakerWorldSearcher._headers(), Authorization="Bearer " + token)
+        r = requests.get(
+            MakerWorldSearcher.PROFILE_DOWNLOAD_URL % entry["_profile_id"],
+            params={"model_id": entry.get("_model_id", "")},
+            headers=headers, timeout=30)
+        if r.status_code == 401:
+            raise RuntimeError("Bambu Cloud rejected the token. Sign in again and "
+                               "paste a fresh one into the plugin's config.")
+        r.raise_for_status()
+        link = (r.json() or {}).get("url")
+        if not link:
+            raise RuntimeError("MakerWorld returned no download URL for %s."
+                               % entry.get("name", "this profile"))
+        return link
+
 
 class GrabcadSearcher:
     # Matches the "platform" field of this adapter's results, so _do_search can
@@ -794,12 +884,32 @@ _SEARCHERS = {
     "grabcad": GrabcadSearcher,
 }
 
-# Keyed on the "platform" field of a result. Only Printables serves model files
-# without a login; MakerWorld ("Please log in to download models"), Nexprint
-# (401) and Makeronline (403) all gate the file behind an account.
+# Keyed on the "platform" field of a result. Printables serves files to anyone;
+# MakerWorld serves them to an account. Nexprint (401) and Makeronline (403)
+# still have no route the plugin can take.
 _FILE_RESOLVERS = {
     "Printables": PrintablesSearcher.get_files,
+    "MakerWorld": MakerWorldSearcher.get_files,
 }
+
+# Platforms that serve files only to an account, and the config key holding the
+# user's own token for each. Without the token the platform stays searchable but
+# is not offered for import, so the guard rail holds: everything the panel says
+# it can import, it can import.
+_TOKEN_KEYS = {"MakerWorld": "makerworld_token"}
+
+# Platforms whose file list carries no URL, because minting one costs an
+# authenticated call that expires in minutes. Called once per picked file, at
+# download time. A platform absent here has usable URLs already.
+_URL_MINTERS = {"MakerWorld": MakerWorldSearcher.mint_url}
+
+
+def _importable(platform, tokens):
+    """True when this platform's files can actually be fetched right now."""
+    if platform not in _FILE_RESOLVERS:
+        return False
+    key = _TOKEN_KEYS.get(platform)
+    return not key or bool(((tokens or {}).get(key) or "").strip())
 
 
 # ---------------------------------------------------------------------------
@@ -868,6 +978,11 @@ PAGE = r"""<!DOCTYPE html>
   .file-picker.active { display:block; }
   .file-picker label { display:block; font-size:0.85em; padding:2px 0; word-break:break-all; }
   .file-picker .hint { color:var(--orca-muted,#888); font-size:0.8em; margin-bottom:4px; }
+  /* Shown only for a result whose platform needs an account the user has not
+     given a token for. The button stays visible but disabled: hiding it would
+     read as "this model has no files", which is the wrong diagnosis. */
+  .gate { display:none; font-size:0.85em; margin:8px 0 4px; color:var(--orca-warn,#e0a030); }
+  .gate.active { display:block; }
   .file-picker .hint button { font-size:0.9em; padding:1px 6px; margin-left:6px; }
   .responsibility { margin:10px 0 0; padding:8px 10px; border-left:3px solid var(--orca-border,#444);
     color:var(--orca-muted,#888); font-size:0.8em; line-height:1.45; }
@@ -880,8 +995,10 @@ PAGE = r"""<!DOCTYPE html>
 <div class="platforms">
   <!-- All four searchable platforms are offered ticked by default. Thingiverse
        and GrabCAD are shown disabled with the short reason, so the window does
-       not pretend they do not exist. Importing onto the plate is only possible
-       where the platform serves files without a login (today Printables). -->
+       not pretend they do not exist. Importing needs a file the plugin can
+       fetch: Printables serves one to anyone, MakerWorld to the account whose
+       token is in the plugin's config. A result that is neither says so on its
+       own panel. -->
   <label><input type="checkbox" checked data-platform="printables"> Printables</label>
   <label><input type="checkbox" checked data-platform="makerworld"> MakerWorld</label>
   <label><input type="checkbox" checked data-platform="nexprint"> Nexprint</label>
@@ -905,6 +1022,7 @@ PAGE = r"""<!DOCTYPE html>
     holder's terms is your act alone, and the authors of this plugin accept no liability
     for it.</p>
   <div id="det-files" class="file-picker"></div>
+  <p id="det-gate" class="gate"></p>
   <button id="det-import-btn" onclick="doImport()">Import into OrcaSlicer</button>
 </div>
 <div id="status">Ready. Type a keyword and press Search.</div>
@@ -972,10 +1090,28 @@ PAGE = r"""<!DOCTYPE html>
     $("det-summary").textContent = model.license_summary || "No license information available.";
     hideFilePicker();
     resetImportBtn();
+    showGate(model);
     // Shown as plain text, never as a link: nothing in this panel may navigate the
     // webview or reach the system browser.
     $("det-url").textContent = model.url ? model.platform + ": " + model.url : "";
     $("detail").classList.add("active");
+  }
+
+  // A result the plugin cannot fetch must say why on the panel, not on the
+  // press: pressing a button that then reports a login wall is the dead end
+  // this replaces.
+  function showGate(model) {
+    var gate = $("det-gate"), btn = $("det-import-btn");
+    if (model.importable) {
+      gate.classList.remove("active");
+      gate.textContent = "";
+      return;
+    }
+    gate.textContent = model.platform + " serves files only to an account. Add your own"
+      + " token under Plugins › 3D Model Search › Config to import from it.";
+    gate.classList.add("active");
+    btn.disabled = true;
+    btn.textContent = "Sign in to " + model.platform + " to import";
   }
 
   function doImport() {
@@ -994,13 +1130,22 @@ PAGE = r"""<!DOCTYPE html>
     orca.postMessage({action:"import", model:selectedModel, files:files});
   }
 
+  // A print's parts are few and usually all wanted, so they start ticked. A
+  // MakerWorld design's plates are not: one Benchy carries 91 profiles, and
+  // starting those ticked turns a single press into 91 downloads. Above the
+  // threshold the list starts empty and says so.
+  var PRETICK_LIMIT = 8;
+
   function showFilePicker(files) {
     window._files = files;
-    var html = '<div class="hint">' + files.length + ' files in this print \u2014 untick what you'
-             + ' do not want on the plate.<button type="button" onclick="setAllFiles(true)">All</button>'
+    var many = files.length > PRETICK_LIMIT;
+    var html = '<div class="hint">' + files.length + (many
+               ? ' files \u2014 tick the ones you want on the plate.'
+               : ' files in this print \u2014 untick what you do not want on the plate.')
+             + '<button type="button" onclick="setAllFiles(true)">All</button>'
              + '<button type="button" onclick="setAllFiles(false)">None</button></div>';
     for (var i = 0; i < files.length; i++) {
-      html += '<label><input type="checkbox" checked data-fidx="' + i + '"> '
+      html += '<label><input type="checkbox"' + (many ? '' : ' checked') + ' data-fidx="' + i + '"> '
             + esc(files[i].name) + '</label>';
     }
     var p = $("det-files");
@@ -1112,6 +1257,33 @@ if orca is not None:
         def get_name(self):
             return "3D Model Search"
 
+        def get_default_config(self):
+            # Seeds the Config tab's JSON editor with the key to fill in, so
+            # "which key?" is answered by the editor itself rather than by docs.
+            return {"makerworld_token": ""}
+
+        def on_load(self):
+            # get_config() works only on the instance the host builds, which is
+            # this one. Logging the key names (never the values) here is also the
+            # answer to the only support question this feature can raise: did the
+            # user's token actually reach the plugin?
+            print("[search_engine] config keys: %s" % (sorted(self._tokens().keys()),),
+                  file=sys.stderr, flush=True)
+
+        def _tokens(self):
+            """The user's own platform tokens, from this capability's config.
+
+            The host stores and returns it; the plugin never writes a credential
+            file of its own, and never reads the app's (the audit hook denies
+            OrcaSlicer.conf and orca_refresh_token.sec to plugins by design).
+            """
+            try:
+                return json.loads(self.get_config() or "{}")
+            except Exception as e:
+                print("[search_engine] config unreadable, treating as empty: %r"
+                      % (e,), file=sys.stderr, flush=True)
+                return {}
+
         def execute(self):
             if self.win is not None and self.win.is_open():
                 self.win.close()
@@ -1164,20 +1336,21 @@ if orca is not None:
         def _do_search(self, msg):
             query = msg.get("query", "")
             platforms = msg.get("platforms", [])
+            tokens = self._tokens()
             results = []
             errors = []
             for platform in platforms:
                 adapter = _SEARCHERS.get(platform)
                 if not adapter:
                     continue
-                if not adapter.enabled({}):
+                if not adapter.enabled(tokens):
                     continue
                 # Searching covers every listed platform; only the import step
-                # needs an entry in _FILE_RESOLVERS.
+                # needs a resolver, and for a gated platform also a token.
                 try:
-                    found = adapter.search(query, {})
+                    found = adapter.search(query, tokens)
                     for r in found:
-                        r["importable"] = r.get("platform", "") in _FILE_RESOLVERS
+                        r["importable"] = _importable(r.get("platform", ""), tokens)
                     results.extend(found)
                 except Exception as e:
                     # Posting the error here used to be pointless: the results
@@ -1205,17 +1378,21 @@ if orca is not None:
             plate.
             """
             if files:
-                self._import_files(model, files)
+                self._import_files(model, files, self._tokens())
                 return
-            resolver = _FILE_RESOLVERS.get(model.get("platform", ""))
+            platform = model.get("platform", "")
+            resolver = _FILE_RESOLVERS.get(platform)
             if resolver is None:
-                # Defensive only: _do_search filters these out before they reach the UI.
+                # Defensive only: the panel disables Import for these.
                 self._post({"action": "error", "message":
-                            "%s does not serve files without a login, so it cannot be "
-                            "imported." % model.get("platform", "This platform")})
+                            "%s serves no file the plugin can fetch, so it cannot be "
+                            "imported." % (platform or "This platform")})
                 return
+            tokens = self._tokens()
             try:
-                files = resolver(model.get("url", ""))
+                # A missing token for a gated platform surfaces here, as the
+                # resolver's own message naming the config key to fill.
+                files = resolver(model.get("url", ""), tokens)
             except Exception as e:
                 self._post({"action": "error", "message": f"Could not list files: {e}"})
                 return
@@ -1225,9 +1402,10 @@ if orca is not None:
             if len(files) > 1:
                 self._post({"action": "choose_files", "files": files})
                 return
-            self._import_files(model, files)
+            self._import_files(model, files, tokens)
 
-        def _import_files(self, model, files):
+        def _import_files(self, model, files, tokens=None):
+            minter = _URL_MINTERS.get(model.get("platform", ""))
             dest_dir = _download_dir()
             try:
                 os.makedirs(dest_dir, exist_ok=True)
@@ -1241,7 +1419,10 @@ if orca is not None:
                 self._post({"action": "status",
                             "message": "Downloading %d/%d: %s" % (i, len(files), f["name"])})
                 try:
-                    paths.append(self._download(f["url"], f["name"], dest_dir))
+                    # Minted here, not at list time: the URL expires in minutes,
+                    # so it must be fetched immediately after it is issued.
+                    url = f.get("url") or (minter(f, tokens) if minter else "")
+                    paths.append(self._download(url, f["name"], dest_dir))
                 except Exception as e:
                     self._post({"action": "error", "message": f"{f['name']}: {e}"})
                     return

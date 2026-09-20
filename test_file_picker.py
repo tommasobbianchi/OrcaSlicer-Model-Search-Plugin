@@ -12,7 +12,13 @@ import types
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 orca_stub = types.ModuleType("orca")
-orca_stub.script = types.SimpleNamespace(ScriptPluginCapabilityBase=object)
+# The host gives every capability get_config(); it returns a JSON *string*.
+class _CapabilityBase:
+    def get_config(self):
+        return "{}"
+
+
+orca_stub.script = types.SimpleNamespace(ScriptPluginCapabilityBase=_CapabilityBase)
 orca_stub.base = object
 orca_stub.plugin = lambda cls: cls
 orca_stub.register_capability = lambda cls: None
@@ -33,7 +39,7 @@ def run(files_arg, resolved):
     script._post = posted.append
     downloaded = []
     script._download = lambda url, name, d: downloaded.append(name) or os.path.join(d, name)
-    se._FILE_RESOLVERS["Printables"] = lambda url: list(resolved)
+    se._FILE_RESOLVERS["Printables"] = lambda url, tokens=None: list(resolved)
     se._download_dir = lambda: "/tmp/picker_test"
     se._load_in_orca = lambda paths: (True, "")
     script._do_import(MODEL, files_arg)

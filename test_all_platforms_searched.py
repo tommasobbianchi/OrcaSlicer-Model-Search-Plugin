@@ -15,7 +15,13 @@ import types
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 orca_stub = types.ModuleType("orca")
-orca_stub.script = types.SimpleNamespace(ScriptPluginCapabilityBase=object)
+# The host gives every capability get_config(); it returns a JSON *string*.
+class _CapabilityBase:
+    def get_config(self):
+        return "{}"
+
+
+orca_stub.script = types.SimpleNamespace(ScriptPluginCapabilityBase=_CapabilityBase)
 orca_stub.base = object
 orca_stub.plugin = lambda cls: cls
 orca_stub.register_capability = lambda cls: None
