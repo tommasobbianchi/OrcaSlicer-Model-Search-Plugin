@@ -106,16 +106,36 @@ def test_saving_a_token_merges_and_never_echoes_it():
     posted = []
     cap._post = posted.append
     cap._save_token({"platform": "MakerWorld", "token": "  SECRET  "})
+    # A successful save is followed by a refreshed Accounts list, so pick the
+    # reply by its action rather than by position.
+    saved = [m for m in posted if m["action"] == "token_saved"][-1]
 
     stored = json.loads(cap.get_config())
     assert stored["makerworld_token"] == "SECRET", "the token is stored, trimmed"
     assert stored["other_token"] == "keep-me", "a merge, not a replace"
-    assert posted[-1]["ok"] is True and posted[-1]["platform"] == "MakerWorld"
-    assert "SECRET" not in json.dumps(posted[-1]), "the reply must not carry the token"
+    assert saved["ok"] is True and saved["platform"] == "MakerWorld"
+    assert "SECRET" not in json.dumps(posted), "no reply may carry the token back"
     assert script._importable("MakerWorld", stored) is True, "import is now offered"
 
     cap._save_token({"platform": "Nexprint", "token": "x"})
     assert posted[-1]["ok"] is False, "a platform with no token key is refused"
+    assert [m for m in posted if m["action"] == "accounts"], "the view is refreshed"
+
+
+def test_accounts_rows_match_what_is_importable():
+    """The setup screen must be derived from the import tables, not restated."""
+    rows = {r["platform"]: r for r in script._accounts({})}
+
+    assert rows["Printables"]["state"] == "open", "no account needed"
+    assert rows["MakerWorld"]["state"] == "needs_token"
+    assert rows["MakerWorld"]["help"], "a gated platform must say how to connect"
+    assert rows["Nexprint"]["state"] == "unavailable", "no resolver, so no token helps"
+    assert rows["GrabCAD"]["state"] == "unavailable"
+
+    connected = {r["platform"]: r for r in script._accounts({"makerworld_token": "T"})}
+    assert connected["MakerWorld"]["state"] == "connected"
+    # Every platform the panel can search has a row, or the screen hides one.
+    assert set(rows) == {a.PLATFORM for a in script._SEARCHERS.values()}
 
 
 def _install_fake_requests():
@@ -146,6 +166,7 @@ if __name__ == "__main__":
     test_importable_follows_the_token()
     test_makerworld_resolver_needs_a_token()
     test_saving_a_token_merges_and_never_echoes_it()
+    test_accounts_rows_match_what_is_importable()
     calls = _install_fake_requests()
     files = test_listing_profiles_mints_nothing(calls)
     test_minting_uses_the_alphanumeric_model_id(calls, files)

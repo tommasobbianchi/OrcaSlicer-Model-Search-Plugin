@@ -666,11 +666,12 @@ class ThingiverseSearcher:
 # top level) and the site attaches it to every download, so reading it off one of
 # those requests is instruction-proof — it survives any change to where the site
 # keeps the session.
-_MW_TOKEN_HELP = (
-    "To get your token: sign in at makerworld.com, press F12 for DevTools, open "
-    "the Network tab, click Download on any model, and copy the text after "
-    "\"Bearer \" from that request's Authorization header. Paste it under "
-    "Plugins > 3D Model Search > Config, as \"makerworld_token\".")
+_TOKEN_HELP = {
+    "MakerWorld":
+        "Sign in at makerworld.com, press F12 for DevTools, open the Network tab, "
+        "click Download on any model, and copy the text after \"Bearer \" from "
+        "that request's Authorization header.",
+}
 
 
 class MakerWorldSearcher:
@@ -782,7 +783,10 @@ class MakerWorldSearcher:
         token = ((tokens or {}).get("makerworld_token") or "").strip()
         if not token:
             raise RuntimeError(
-                "MakerWorld serves files only to an account. " + _MW_TOKEN_HELP)
+                "MakerWorld serves files only to an account. "
+                + _TOKEN_HELP["MakerWorld"]
+                + ' Use the Accounts button in the plugin window, or set '
+                + '"makerworld_token" in Plugins > 3D Model Search > Config.')
         m = re.search(r"/models/(\d+)", model_url or "")
         if not m:
             return []
@@ -915,6 +919,31 @@ _TOKEN_KEYS = {"MakerWorld": "makerworld_token"}
 _URL_MINTERS = {"MakerWorld": MakerWorldSearcher.mint_url}
 
 
+def _accounts(tokens):
+    """One row per platform the panel searches, for the Accounts view.
+
+    Built from the same tables the import path consults, so the setup screen
+    cannot drift from what is actually importable.
+    """
+    rows = []
+    for adapter in _SEARCHERS.values():
+        name = getattr(adapter, "PLATFORM", "")
+        if not name:
+            continue
+        key = _TOKEN_KEYS.get(name)
+        if key:
+            state = "connected" if _importable(name, tokens) else "needs_token"
+        elif name in _FILE_RESOLVERS:
+            state = "open"          # no account needed at all
+        else:
+            state = "unavailable"   # nothing the plugin can fetch, with or without one
+        rows.append({"platform": name, "state": state, "key": key or "",
+                     "help": _TOKEN_HELP.get(name, "")})
+    rows.sort(key=lambda r: ({"needs_token": 0, "connected": 1, "open": 2,
+                              "unavailable": 3}[r["state"]], r["platform"]))
+    return rows
+
+
 def _importable(platform, tokens):
     """True when this platform's files can actually be fetched right now."""
     if platform not in _FILE_RESOLVERS:
@@ -997,6 +1026,14 @@ PAGE = r"""<!DOCTYPE html>
   .tokenbox { display:none; gap:6px; margin:4px 0 10px; }
   .tokenbox.active { display:flex; }
   .tokenbox input { flex:1; min-width:0; }
+  .acct { border-bottom:1px solid var(--orca-border,#333); padding:10px 0; }
+  .acct:last-child { border-bottom:none; }
+  .acct h3 { font-size:0.95em; display:flex; align-items:center; gap:8px; }
+  .acct p { font-size:0.84em; margin:4px 0 0; }
+  .pill { font-size:0.72em; padding:1px 7px; border-radius:3px; }
+  .pill-ok { background:#1a5c2a; color:#6f6; }
+  .pill-need { background:#5c3a1a; color:#fa3; }
+  .pill-off { background:#444; color:#aaa; }
   .file-picker .hint button { font-size:0.9em; padding:1px 6px; margin-left:6px; }
   .responsibility { margin:10px 0 0; padding:8px 10px; border-left:3px solid var(--orca-border,#444);
     color:var(--orca-muted,#888); font-size:0.8em; line-height:1.45; }
@@ -1005,6 +1042,7 @@ PAGE = r"""<!DOCTYPE html>
 <div class="search-row">
   <input id="query" type="text" placeholder="Search for 3D models..." />
   <button id="search-btn" onclick="doSearch()">Search</button>
+  <button class="secondary" onclick="showAccounts()">Accounts</button>
 </div>
 <div class="platforms">
   <!-- All four searchable platforms are offered ticked by default. Thingiverse
@@ -1019,6 +1057,14 @@ PAGE = r"""<!DOCTYPE html>
   <label><input type="checkbox" checked data-platform="makeronline"> Makeronline</label>
   <label><input type="checkbox" disabled data-platform="thingiverse"> Thingiverse (API token needed)</label>
   <label><input type="checkbox" disabled data-platform="grabcad"> GrabCAD (API retired)</label>
+</div>
+<div id="accounts" class="detail-panel">
+  <button class="det-close" onclick="$('accounts').classList.remove('active')">&times;</button>
+  <h2>Accounts</h2>
+  <p>Connect the portals you already have an account on. The plugin never asks for a
+     password and never opens a browser: you sign in at the portal yourself, and it
+     keeps only the token you hand it, in OrcaSlicer's own plugin config.</p>
+  <div id="acct-rows"></div>
 </div>
 <div id="results"></div>
 <div id="detail" class="detail-panel">
@@ -1047,6 +1093,9 @@ PAGE = r"""<!DOCTYPE html>
 <script>
   // ponytail: no JS console in the wx webview -> pipe errors/probes to Python stderr.
   function jlog(m) { try { orca.postMessage({action:"log", msg:String(m)}); } catch(e) {} }
+  // Asked for by the page rather than pushed at window creation: the host builds
+  // the window before the document is listening, so a push would race the load.
+  try { orca.postMessage({action:"accounts"}); } catch (e) {}
   window.onerror = function(m, s, l, c, e) {
     jlog("JSERR " + m + " @" + l + ":" + c + (e && e.stack ? " | " + e.stack : ""));
   };
@@ -1115,12 +1164,40 @@ PAGE = r"""<!DOCTYPE html>
     $("detail").classList.add("active");
   }
 
-  var TOKEN_HELP = {
-    "MakerWorld": " Sign in at makerworld.com, press F12 \u203a Network, click Download"
-      + " on any model, and copy the text after \"Bearer \" from that request's"
-      + " Authorization header into Plugins \u203a 3D Model Search \u203a Config,"
-      + " as \"makerworld_token\"."
-  };
+  // Filled from the Accounts message, so the help text has one home (Python's
+  // _TOKEN_HELP) instead of a copy here that can drift from it.
+  var TOKEN_HELP = {}, ACCOUNTS = [];
+
+  function showAccounts() {
+    var box = $("acct-rows"), html = "";
+    ACCOUNTS.forEach(function (a, i) {
+      var pill = {connected:["pill-ok","Connected"], needs_token:["pill-need","Not connected"],
+                  open:["pill-ok","No account needed"], unavailable:["pill-off","Not importable"]}[a.state];
+      html += '<div class="acct"><h3>' + esc(a.platform)
+           +  ' <span class="pill ' + pill[0] + '">' + pill[1] + '</span></h3>';
+      if (a.state === "needs_token" || a.state === "connected") {
+        html += '<p>' + esc(a.help) + '</p>'
+             +  '<div class="tokenbox active">'
+             +  '<input type="password" autocomplete="off" data-acct="' + i + '" placeholder="'
+             +  (a.state === "connected" ? "Replace the saved token" : "Paste the token here") + '">'
+             +  '<button onclick="saveAcct(' + i + ')">Save</button></div>';
+      } else if (a.state === "unavailable") {
+        html += '<p>Searchable, but it serves no file the plugin can fetch yet.</p>';
+      } else {
+        html += '<p>Files download without signing in to anything.</p>';
+      }
+      html += '</div>';
+    });
+    box.innerHTML = html;
+    $("accounts").classList.add("active");
+  }
+
+  function saveAcct(i) {
+    var el = document.querySelector('#acct-rows input[data-acct="' + i + '"]');
+    var t = el && el.value.trim();
+    if (!t) return;
+    orca.postMessage({action:"save_token", platform:ACCOUNTS[i].platform, token:t});
+  }
 
   // A result the plugin cannot fetch must say why on the panel, not on the
   // press: pressing a button that then reports a login wall is the dead end
@@ -1275,6 +1352,13 @@ PAGE = r"""<!DOCTYPE html>
       document.getElementById("detail").innerHTML +=
         "<p style=\"color:#4a4;margin-top:8px\">Saved to:<br><code>" + esc(msg.path) + "</code></p>"
         + "<p style=\"color:var(--orca-muted)\">Open this file from the OrcaSlicer File menu.</p>";
+    } else if (msg && msg.action === "accounts") {
+      ACCOUNTS = msg.rows || [];
+      TOKEN_HELP = {};
+      ACCOUNTS.forEach(function (a) { if (a.help) TOKEN_HELP[a.platform] = " " + a.help; });
+      // First run: show the setup instead of letting the user meet the gate
+      // later, on a model they already decided they wanted.
+      if (msg.first_run) showAccounts();
     } else if (msg && msg.action === "token_saved") {
       $("det-token-save").disabled = false;
       if (!msg.ok) { $("status").textContent = "Could not save the token: " + (msg.message || ""); return; }
@@ -1289,6 +1373,8 @@ PAGE = r"""<!DOCTYPE html>
         showGate(selectedModel);
         resetImportBtn();
       }
+      ACCOUNTS.forEach(function (a) { if (a.platform === msg.platform) a.state = "connected"; });
+      if ($("accounts").classList.contains("active")) showAccounts();
       $("status").textContent = msg.platform + " token saved. You can import now.";
     } else if (msg && msg.action === "error") {
       searching = false;
@@ -1379,6 +1465,8 @@ if orca is not None:
                 print("[search_engine/js] " + str(msg.get("msg", "")), file=sys.stderr, flush=True)
             elif action == "search":
                 threading.Thread(target=self._do_search, args=(msg,), daemon=True).start()
+            elif action == "accounts":
+                self._post_accounts()
             elif action == "save_token":
                 self._save_token(msg)
             elif action == "import":
@@ -1386,6 +1474,16 @@ if orca is not None:
                 if model:
                     threading.Thread(target=self._do_import,
                                      args=(model, msg.get("files")), daemon=True).start()
+
+        def _post_accounts(self):
+            # get_config_version() is "" until something has been saved, which is
+            # the first-run signal without inventing a config key for it.
+            try:
+                first_run = not (self.get_config_version() or "")
+            except Exception:
+                first_run = False
+            self._post({"action": "accounts", "rows": _accounts(self._tokens()),
+                        "first_run": first_run})
 
         def _save_token(self, msg):
             """Store one platform's token in the config the host keeps for us.
@@ -1410,6 +1508,8 @@ if orca is not None:
                   file=sys.stderr, flush=True)
             self._post({"action": "token_saved", "ok": ok,
                         "platform": msg.get("platform", ""), "message": err})
+            if ok:
+                self._post_accounts()
 
         def on_close(self):
             self.win = None
