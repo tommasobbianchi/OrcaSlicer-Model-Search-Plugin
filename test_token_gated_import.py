@@ -4,6 +4,7 @@
 Covers the guard rail (nothing is offered for import that cannot be fetched)
 and the MakerWorld two-hop resolve, with no network and no `orca` host.
 """
+import json
 import os
 import sys
 import types
@@ -13,7 +14,21 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Enough of the host for the capability class to be defined; nothing here is
 # called, so no OrcaSlicer and no network.
 orca_stub = types.ModuleType("orca")
-orca_stub.script = types.SimpleNamespace(ScriptPluginCapabilityBase=object)
+# The host gives every capability get_config()/save_config(); get_config()
+# returns a JSON *string*, and save_config() takes one and returns a bool.
+class _CapabilityBase:
+    _stored = "{}"
+
+    def get_config(self):
+        return self._stored
+
+    def save_config(self, config):
+        json.loads(config)          # the host refuses anything that is not JSON
+        self._stored = config
+        return True
+
+
+orca_stub.script = types.SimpleNamespace(ScriptPluginCapabilityBase=_CapabilityBase)
 orca_stub.base = object
 orca_stub.plugin = lambda cls: cls
 orca_stub.register_capability = lambda cls: None
@@ -83,6 +98,26 @@ def test_minting_uses_the_alphanumeric_model_id(calls, files):
     assert calls[0]["headers"]["Authorization"] == "Bearer TOK"
 
 
+def test_saving_a_token_merges_and_never_echoes_it():
+    """Saving one platform's token must not drop another's, or leak the value."""
+    cap = script.SearchEngineScript()
+    cap._stored = json.dumps({"other_token": "keep-me"})
+
+    posted = []
+    cap._post = posted.append
+    cap._save_token({"platform": "MakerWorld", "token": "  SECRET  "})
+
+    stored = json.loads(cap.get_config())
+    assert stored["makerworld_token"] == "SECRET", "the token is stored, trimmed"
+    assert stored["other_token"] == "keep-me", "a merge, not a replace"
+    assert posted[-1]["ok"] is True and posted[-1]["platform"] == "MakerWorld"
+    assert "SECRET" not in json.dumps(posted[-1]), "the reply must not carry the token"
+    assert script._importable("MakerWorld", stored) is True, "import is now offered"
+
+    cap._save_token({"platform": "Nexprint", "token": "x"})
+    assert posted[-1]["ok"] is False, "a platform with no token key is refused"
+
+
 def _install_fake_requests():
     """Patch the `requests` module the resolver imports, recording every call."""
     calls = []
@@ -110,6 +145,7 @@ def _install_fake_requests():
 if __name__ == "__main__":
     test_importable_follows_the_token()
     test_makerworld_resolver_needs_a_token()
+    test_saving_a_token_merges_and_never_echoes_it()
     calls = _install_fake_requests()
     files = test_listing_profiles_mints_nothing(calls)
     test_minting_uses_the_alphanumeric_model_id(calls, files)

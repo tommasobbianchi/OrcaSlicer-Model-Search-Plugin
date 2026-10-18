@@ -994,6 +994,9 @@ PAGE = r"""<!DOCTYPE html>
      read as "this model has no files", which is the wrong diagnosis. */
   .gate { display:none; font-size:0.85em; margin:8px 0 4px; color:var(--orca-warn,#e0a030); }
   .gate.active { display:block; }
+  .tokenbox { display:none; gap:6px; margin:4px 0 10px; }
+  .tokenbox.active { display:flex; }
+  .tokenbox input { flex:1; min-width:0; }
   .file-picker .hint button { font-size:0.9em; padding:1px 6px; margin-left:6px; }
   .responsibility { margin:10px 0 0; padding:8px 10px; border-left:3px solid var(--orca-border,#444);
     color:var(--orca-muted,#888); font-size:0.8em; line-height:1.45; }
@@ -1034,6 +1037,10 @@ PAGE = r"""<!DOCTYPE html>
     for it.</p>
   <div id="det-files" class="file-picker"></div>
   <p id="det-gate" class="gate"></p>
+  <div id="det-tokenbox" class="tokenbox">
+    <input id="det-token" type="password" placeholder="Paste the token here" autocomplete="off">
+    <button id="det-token-save" onclick="saveToken()">Save</button>
+  </div>
   <button id="det-import-btn" onclick="doImport()">Import into OrcaSlicer</button>
 </div>
 <div id="status">Ready. Type a keyword and press Search.</div>
@@ -1123,6 +1130,7 @@ PAGE = r"""<!DOCTYPE html>
     if (model.importable) {
       gate.classList.remove("active");
       gate.textContent = "";
+      $("det-tokenbox").classList.remove("active");
       return;
     }
     // Only MakerWorld has a token route today; the others are gated because no
@@ -1130,8 +1138,20 @@ PAGE = r"""<!DOCTYPE html>
     gate.textContent = model.platform + " serves files only to an account."
       + (TOKEN_HELP[model.platform] || " The plugin cannot fetch its files yet.");
     gate.classList.add("active");
+    // A disabled button under an instruction is a dead end: the user is told what
+    // to do and given nothing to do it with. The field is the action.
+    $("det-tokenbox").classList.toggle("active", !!TOKEN_HELP[model.platform]);
     btn.disabled = true;
-    btn.textContent = "Sign in to " + model.platform + " to import";
+    btn.textContent = TOKEN_HELP[model.platform]
+      ? "Save your token to import" : "Not importable";
+  }
+
+  function saveToken() {
+    if (!selectedModel) return;
+    var t = $("det-token").value.trim();
+    if (!t) return;
+    $("det-token-save").disabled = true;
+    orca.postMessage({action:"save_token", platform:selectedModel.platform, token:t});
   }
 
   function doImport() {
@@ -1255,6 +1275,21 @@ PAGE = r"""<!DOCTYPE html>
       document.getElementById("detail").innerHTML +=
         "<p style=\"color:#4a4;margin-top:8px\">Saved to:<br><code>" + esc(msg.path) + "</code></p>"
         + "<p style=\"color:var(--orca-muted)\">Open this file from the OrcaSlicer File menu.</p>";
+    } else if (msg && msg.action === "token_saved") {
+      $("det-token-save").disabled = false;
+      if (!msg.ok) { $("status").textContent = "Could not save the token: " + (msg.message || ""); return; }
+      $("det-token").value = "";
+      // Every result from that platform becomes importable, not just this one:
+      // the token is the platform's gate, not the model's.
+      (window._results || []).forEach(function (r) {
+        if (r.platform === msg.platform) r.importable = true;
+      });
+      if (selectedModel && selectedModel.platform === msg.platform) {
+        selectedModel.importable = true;
+        showGate(selectedModel);
+        resetImportBtn();
+      }
+      $("status").textContent = msg.platform + " token saved. You can import now.";
     } else if (msg && msg.action === "error") {
       searching = false;
       btn.disabled = false;
@@ -1344,11 +1379,37 @@ if orca is not None:
                 print("[search_engine/js] " + str(msg.get("msg", "")), file=sys.stderr, flush=True)
             elif action == "search":
                 threading.Thread(target=self._do_search, args=(msg,), daemon=True).start()
+            elif action == "save_token":
+                self._save_token(msg)
             elif action == "import":
                 model = msg.get("model") or {}
                 if model:
                     threading.Thread(target=self._do_import,
                                      args=(model, msg.get("files")), daemon=True).start()
+
+        def _save_token(self, msg):
+            """Store one platform's token in the config the host keeps for us.
+
+            Merged into the existing config rather than replacing it, so saving a
+            second platform's token never drops the first.
+            """
+            key = _TOKEN_KEYS.get(msg.get("platform", ""))
+            if not key:
+                self._post({"action": "token_saved", "ok": False,
+                            "message": "unknown platform"})
+                return
+            cfg = self._tokens()
+            cfg[key] = (msg.get("token") or "").strip()
+            try:
+                ok = bool(self.save_config(json.dumps(cfg)))
+                err = "" if ok else "the host refused to write the config"
+            except Exception as e:
+                ok, err = False, repr(e)
+            # Never echo the token back, not even in the failure path.
+            print("[search_engine] save_config(%s) -> %s %s" % (key, ok, err),
+                  file=sys.stderr, flush=True)
+            self._post({"action": "token_saved", "ok": ok,
+                        "platform": msg.get("platform", ""), "message": err})
 
         def on_close(self):
             self.win = None
