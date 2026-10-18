@@ -118,6 +118,52 @@ emailed 6-digit code), so a pasted token is both the only route and the most def
 runs only for the entries the user ticked. The picker also stops pre-ticking above 8 files,
 because 91 pre-ticked plates turn one press into 91 downloads.
 
+### How the Makeronline download works
+Verified end to end in the running app, 2026-10-18.
+
+Makeronline runs no login of its own: it authenticates through Anycubic's **Casdoor** SSO at
+`cas.anycubic.com`. Everything needed is published in the site's own bundle
+(`www.makeronline.com/_nuxt/app.*.js`): client id `69ce24b6eaf78e597ac0`, application
+`ac_maker_online`, organization `anycubic`.
+
+```
+GET  cas.anycubic.com/api/get-app-login?type=code&clientId=..&responseType=code
+                                       &redirectUri=https://www.makeronline.com&scope=read&state=x
+        -> the application config.  type=code is MANDATORY: without it data is null.
+           It answers enablePassword:true, enableCodeSignin:FALSE.
+POST cas.anycubic.com/api/login?clientId=..&responseType=code&redirectUri=..&scope=read
+                               &state=ac_maker_online
+        {application, organization, username, password, remember, isRecMarEmail, type:"code"}
+        -> {"status":"ok","data":"<oauth code>"}      ("status":"error" carries Casdoor's own msg)
+GET  www.makeronline.com/api/login?code=<code>&state=ac_maker_online
+        -> {"code":0,"data":{"access_token":..,"expire_time":..}}
+```
+
+**There is no e-mail code here**, unlike Bambu: `enableCodeSignin` is false, so the Accounts
+row asks for the Anycubic password. It goes to Anycubic and nowhere else, is never stored, and
+the field is cleared as soon as the reply lands. Only `access_token` is kept.
+
+**The exchange route is `/api/login`, NOT `api/v2/auth/login`.** The bundle defines the latter
+and nothing serves it: every request shape answers `{"code":1,"message":"Server internal
+error"}` — byte for byte what unknown routes answer, which cost a release to learn. The real
+one answers `invalid_grant` for a bad code and `invalid_request` with no parameters. A Casdoor
+code is single-use and expires in moments, so `invalid_grant` is translated for the user.
+
+Files and minting:
+
+```
+GET  /api/mold/detail?id=<mold_id>   anonymous; the parameter is `id` ("mold_id" answers
+                                     "The id field is required"). files[] = {file_id, file_name,
+                                     file_size, key, parse_type}.  Model URLs end /<mold_id>.html
+POST /api/file/download              Authorization: <access_token>  RAW, no "Bearer" — the site's
+                                     axios interceptor sets `Authorization = token` verbatim
+        {key, file_type:1, mold_id:<int>, is_batch_down:0}
+        -> {"code":0,"data":"<signed S3 url>"}      code 1003 = its risk check wants a captcha
+```
+
+`file_type` 2 is a print profile (`print_profile_id`), 3 carries both. Listing stays anonymous
+and mints nothing, for the same reason as MakerWorld.
+
 ### How the file reaches Prepare (all three OSes)
 The plugin host API is **read-only** — `orca.host.model/mesh/presets/slicing` only
 inspect; there is no import/add-object binding. But every running instance listens on
