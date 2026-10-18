@@ -78,7 +78,21 @@ only works on the instance the host built; a hand-constructed one raises "only a
 capability loaded by the plugin host", which is what the debug autorun hits. `get_default_config()`
 seeds the Config tab's JSON editor with `{"makerworld_token": ""}` so the key names itself.
 
-**Where the user gets the token** (the gap that made MakerWorld unusable in practice: nothing
+**Signing in from the window (the normal route since 2026-10-18).** Bambu has a passwordless
+code login, so the plugin never asks for a password:
+
+```
+POST api.bambulab.com/v1/user-service/user/sendemail/code  {"email": e, "type": "codeLogin"}  -> 200
+POST api.bambulab.com/v1/user-service/user/login           {"account": e, "code": "123456"}   -> {"accessToken": ...}
+```
+
+`type: "codeLogin"` is mandatory and measured: without it the reply is `{"code":1,"error":"This
+account is not registered."}` even for a real address, and a wrong type gives `{"code":2}`.
+sendemail/code answers 200 for an unknown address too (anti-enumeration), so the UI must not
+read 200 as "that account exists". A login that returns 200 with no `accessToken` means another
+factor is required; `loginType` names it.
+
+**Where the user gets the token by hand** (the fallback, behind "Or paste a token instead") (the gap that made MakerWorld unusable in practice: nothing
 anywhere said this). The bearer is the `accessToken` that `POST
 api.bambulab.com/v1/user-service/user/login` returns at the top level, and the site attaches it
 to every download it performs. So the instruction the plugin now gives — sign in at

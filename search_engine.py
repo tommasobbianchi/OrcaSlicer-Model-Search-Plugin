@@ -666,11 +666,21 @@ class ThingiverseSearcher:
 # top level) and the site attaches it to every download, so reading it off one of
 # those requests is instruction-proof — it survives any change to where the site
 # keeps the session.
+def _api_error(resp, fallback):
+    """The server's own words when it has any, so the user sees the real reason."""
+    try:
+        body = resp.json() or {}
+        msg = body.get("error") or body.get("message") or ""
+    except Exception:
+        msg = (resp.text or "").strip()[:200]
+    return msg or ("%s (HTTP %d)" % (fallback, resp.status_code))
+
+
 _TOKEN_HELP = {
     "MakerWorld":
-        "Sign in at makerworld.com, press F12 for DevTools, open the Network tab, "
-        "click Download on any model, and copy the text after \"Bearer \" from "
-        "that request's Authorization header.",
+        "Sign in with your Bambu Lab account. Enter your email, press Send code, "
+        "and type the six digits Bambu emails you. No password is asked for or "
+        "stored \u2014 the code login does not use one.",
 }
 
 
@@ -764,6 +774,47 @@ class MakerWorldSearcher:
     @staticmethod
     def _headers():
         return {"User-Agent": _BROWSER_UA, "Referer": MakerWorldSearcher.BASE + "/"}
+
+    # Bambu's own passwordless sign-in: ask for a six-digit code by email, then
+    # exchange it for the bearer. Measured 2026-10-18 against the live API:
+    # sendemail/code REQUIRES type="codeLogin" (without it the reply is "This
+    # account is not registered"; a wrong type is refused outright), and login
+    # with {account, code} is accepted on the code path. Deliberately NOT the
+    # password flow: the plugin never asks for, sees or stores a password.
+    SEND_CODE_URL = "https://api.bambulab.com/v1/user-service/user/sendemail/code"
+    LOGIN_URL = "https://api.bambulab.com/v1/user-service/user/login"
+
+    @staticmethod
+    def send_code(email):
+        import requests
+
+        r = requests.post(MakerWorldSearcher.SEND_CODE_URL,
+                          json={"email": email, "type": "codeLogin"},
+                          headers=MakerWorldSearcher._headers(), timeout=30)
+        if r.status_code != 200:
+            raise RuntimeError(_api_error(r, "Bambu would not send a code"))
+        # 200 for an unknown address too, by design: the API does not reveal
+        # whether an account exists, and neither does this message.
+        return "Bambu has emailed a six-digit code to %s." % email
+
+    @staticmethod
+    def login_with_code(email, code):
+        import requests
+
+        r = requests.post(MakerWorldSearcher.LOGIN_URL,
+                          json={"account": email, "code": code},
+                          headers=MakerWorldSearcher._headers(), timeout=30)
+        if r.status_code != 200:
+            raise RuntimeError(_api_error(r, "Bambu rejected the sign-in"))
+        data = r.json() or {}
+        token = data.get("accessToken") or ""
+        if not token:
+            # A login that succeeds without a token means Bambu wants another
+            # factor; say which one rather than reporting a blank success.
+            raise RuntimeError(
+                "Bambu needs a further step (%s) that this window cannot do."
+                % (data.get("loginType") or "unknown"))
+        return token
 
     @staticmethod
     def get_files(model_url, tokens=None):
@@ -918,6 +969,12 @@ _TOKEN_KEYS = {"MakerWorld": "makerworld_token"}
 # download time. A platform absent here has usable URLs already.
 _URL_MINTERS = {"MakerWorld": MakerWorldSearcher.mint_url}
 
+# Platforms that can be signed into from inside the plugin window, without a
+# password: (request a code, exchange it for a token). A platform absent here
+# can still be connected by pasting a token.
+_AUTH = {"MakerWorld": (MakerWorldSearcher.send_code,
+                        MakerWorldSearcher.login_with_code)}
+
 
 def _accounts(tokens):
     """One row per platform the panel searches, for the Accounts view.
@@ -938,7 +995,8 @@ def _accounts(tokens):
         else:
             state = "unavailable"   # nothing the plugin can fetch, with or without one
         rows.append({"platform": name, "state": state, "key": key or "",
-                     "help": _TOKEN_HELP.get(name, "")})
+                     "help": _TOKEN_HELP.get(name, ""),
+                     "can_sign_in": name in _AUTH})
     rows.sort(key=lambda r: ({"needs_token": 0, "connected": 1, "open": 2,
                               "unavailable": 3}[r["state"]], r["platform"]))
     return rows
@@ -1034,6 +1092,12 @@ PAGE = r"""<!DOCTYPE html>
   .pill-ok { background:#1a5c2a; color:#6f6; }
   .pill-need { background:#5c3a1a; color:#fa3; }
   .pill-off { background:#444; color:#aaa; }
+  .acct .row { display:flex; gap:6px; margin-top:8px; }
+  .acct .row input { flex:1; min-width:0; }
+  .acct details { margin-top:8px; }
+  .acct summary { font-size:0.8em; color:var(--orca-muted,#888); cursor:pointer; }
+  .acct .note { font-size:0.8em; margin-top:6px; }
+  .acct .note.bad { color:var(--orca-warn,#e0a030); }
   .file-picker .hint button { font-size:0.9em; padding:1px 6px; margin-left:6px; }
   .responsibility { margin:10px 0 0; padding:8px 10px; border-left:3px solid var(--orca-border,#444);
     color:var(--orca-muted,#888); font-size:0.8em; line-height:1.45; }
@@ -1176,11 +1240,23 @@ PAGE = r"""<!DOCTYPE html>
       html += '<div class="acct"><h3>' + esc(a.platform)
            +  ' <span class="pill ' + pill[0] + '">' + pill[1] + '</span></h3>';
       if (a.state === "needs_token" || a.state === "connected") {
-        html += '<p>' + esc(a.help) + '</p>'
-             +  '<div class="tokenbox active">'
+        html += '<p>' + esc(a.help) + '</p>';
+        if (a.can_sign_in) {
+          html += '<div class="row"><input type="email" autocomplete="off" data-email="' + i + '"'
+               +  ' placeholder="Your ' + esc(a.platform) + ' account email">'
+               +  '<button data-send="' + i + '" onclick="sendCode(' + i + ')">Send code</button></div>'
+               +  '<div class="row" data-codebox="' + i + '" style="display:none">'
+               +  '<input type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6"'
+               +  ' data-code="' + i + '" placeholder="Six-digit code from the email">'
+               +  '<button onclick="signIn(' + i + ')">Sign in</button></div>'
+               +  '<p class="note" data-note="' + i + '"></p>'
+               +  '<details><summary>Or paste a token instead</summary>';
+        }
+        html += '<div class="tokenbox active">'
              +  '<input type="password" autocomplete="off" data-acct="' + i + '" placeholder="'
              +  (a.state === "connected" ? "Replace the saved token" : "Paste the token here") + '">'
              +  '<button onclick="saveAcct(' + i + ')">Save</button></div>';
+        if (a.can_sign_in) html += '</details>';
       } else if (a.state === "unavailable") {
         html += '<p>Searchable, but it serves no file the plugin can fetch yet.</p>';
       } else {
@@ -1190,6 +1266,33 @@ PAGE = r"""<!DOCTYPE html>
     });
     box.innerHTML = html;
     $("accounts").classList.add("active");
+  }
+
+  function acctEl(kind, i) {
+    return document.querySelector('#acct-rows [data-' + kind + '="' + i + '"]');
+  }
+
+  function acctNote(i, text, bad) {
+    var n = acctEl("note", i);
+    if (!n) return;
+    n.textContent = text || "";
+    n.classList.toggle("bad", !!bad);
+  }
+
+  function sendCode(i) {
+    var e = acctEl("email", i), v = e && e.value.trim();
+    if (!v) { acctNote(i, "Enter your account email first.", true); return; }
+    acctEl("send", i).disabled = true;
+    acctNote(i, "Asking " + ACCOUNTS[i].platform + " to email a code\u2026");
+    orca.postMessage({action:"send_code", platform:ACCOUNTS[i].platform, email:v});
+  }
+
+  function signIn(i) {
+    var c = acctEl("code", i), v = c && c.value.trim();
+    if (!v) { acctNote(i, "Enter the six-digit code.", true); return; }
+    acctNote(i, "Signing in\u2026");
+    orca.postMessage({action:"sign_in", platform:ACCOUNTS[i].platform,
+                      email:acctEl("email", i).value.trim(), code:v});
   }
 
   function saveAcct(i) {
@@ -1359,6 +1462,19 @@ PAGE = r"""<!DOCTYPE html>
       // First run: show the setup instead of letting the user meet the gate
       // later, on a model they already decided they wanted.
       if (msg.first_run) showAccounts();
+    } else if (msg && msg.action === "auth") {
+      var ai = -1;
+      ACCOUNTS.forEach(function (a, k) { if (a.platform === msg.platform) ai = k; });
+      if (ai < 0) return;
+      var send = acctEl("send", ai);
+      if (send) send.disabled = false;
+      if (!msg.ok) { acctNote(ai, msg.message, true); return; }
+      if (msg.stage === "code_sent") {
+        var box = document.querySelector('#acct-rows [data-codebox="' + ai + '"]');
+        if (box) box.style.display = "flex";
+        var c = acctEl("code", ai); if (c) c.focus();
+      }
+      acctNote(ai, msg.message || "");
     } else if (msg && msg.action === "token_saved") {
       $("det-token-save").disabled = false;
       if (!msg.ok) { $("status").textContent = "Could not save the token: " + (msg.message || ""); return; }
@@ -1467,6 +1583,9 @@ if orca is not None:
                 threading.Thread(target=self._do_search, args=(msg,), daemon=True).start()
             elif action == "accounts":
                 self._post_accounts()
+            elif action in ("send_code", "sign_in"):
+                threading.Thread(target=self._do_auth, args=(action, msg),
+                                 daemon=True).start()
             elif action == "save_token":
                 self._save_token(msg)
             elif action == "import":
@@ -1484,6 +1603,31 @@ if orca is not None:
                 first_run = False
             self._post({"action": "accounts", "rows": _accounts(self._tokens()),
                         "first_run": first_run})
+
+        def _do_auth(self, action, msg):
+            """Run one step of a platform's in-window sign-in, off the UI thread."""
+            platform = msg.get("platform", "")
+            pair = _AUTH.get(platform)
+            if not pair:
+                self._post({"action": "auth", "ok": False, "platform": platform,
+                            "message": "%s cannot be signed into from here." % platform})
+                return
+            send_code, login = pair
+            try:
+                if action == "send_code":
+                    note = send_code((msg.get("email") or "").strip())
+                    self._post({"action": "auth", "ok": True, "platform": platform,
+                                "stage": "code_sent", "message": note})
+                    return
+                token = login((msg.get("email") or "").strip(),
+                              (msg.get("code") or "").strip())
+            except Exception as e:
+                self._post({"action": "auth", "ok": False, "platform": platform,
+                            "message": str(e) or repr(e)})
+                return
+            # Straight into the same store the pasted token uses, so there is one
+            # code path holding a credential and one place it can go wrong.
+            self._save_token({"platform": platform, "token": token})
 
         def _save_token(self, msg):
             """Store one platform's token in the config the host keeps for us.

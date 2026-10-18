@@ -138,6 +138,59 @@ def test_accounts_rows_match_what_is_importable():
     assert set(rows) == {a.PLATFORM for a in script._SEARCHERS.values()}
 
 
+def test_signing_in_asks_for_a_code_and_never_a_password():
+    """The in-window sign-in is Bambu's code login: email + 6 digits, no password."""
+    posts = []
+    fake = types.ModuleType("requests")
+
+    def post(url, json=None, headers=None, timeout=None):
+        posts.append({"url": url, "json": json or {}})
+        if url.endswith("/sendemail/code"):
+            return _Resp({}, 200)
+        if url.endswith("/user/login"):
+            if (json or {}).get("code") == "123456":
+                return _Resp({"accessToken": "TOK", "refreshToken": "R"}, 200)
+            return _Resp({"loginType": "tfa"}, 200)
+        raise AssertionError("unexpected call: " + url)
+
+    fake.post = post
+    sys.modules["requests"] = fake
+
+    note = script.MakerWorldSearcher.send_code("someone@example.com")
+    # Measured against the live API: without this exact type the request is
+    # answered as if the account did not exist.
+    assert posts[-1]["json"] == {"email": "someone@example.com", "type": "codeLogin"}
+    assert "code" in note.lower()
+
+    token = script.MakerWorldSearcher.login_with_code("someone@example.com", "123456")
+    assert token == "TOK"
+    assert posts[-1]["json"] == {"account": "someone@example.com", "code": "123456"}
+    assert "password" not in json.dumps(posts), "no request may carry a password"
+
+    try:
+        script.MakerWorldSearcher.login_with_code("someone@example.com", "999999")
+    except RuntimeError as e:
+        assert "tfa" in str(e), "a token-less success must name the missing step"
+    else:
+        raise AssertionError("a login with no token must raise")
+
+
+def test_a_completed_sign_in_stores_the_token():
+    cap = script.SearchEngineScript()
+    cap._stored = "{}"
+    posted = []
+    cap._post = posted.append
+    cap._do_auth("sign_in", {"platform": "MakerWorld",
+                             "email": "someone@example.com", "code": "123456"})
+
+    assert json.loads(cap.get_config())["makerworld_token"] == "TOK"
+    assert [m for m in posted if m["action"] == "token_saved" and m["ok"]]
+
+    cap._do_auth("sign_in", {"platform": "Printables"})
+    assert posted[-1] == {"action": "auth", "ok": False, "platform": "Printables",
+                          "message": "Printables cannot be signed into from here."}
+
+
 def _install_fake_requests():
     """Patch the `requests` module the resolver imports, recording every call."""
     calls = []
@@ -167,6 +220,8 @@ if __name__ == "__main__":
     test_makerworld_resolver_needs_a_token()
     test_saving_a_token_merges_and_never_echoes_it()
     test_accounts_rows_match_what_is_importable()
+    test_signing_in_asks_for_a_code_and_never_a_password()
+    test_a_completed_sign_in_stores_the_token()
     calls = _install_fake_requests()
     files = test_listing_profiles_mints_nothing(calls)
     test_minting_uses_the_alphanumeric_model_id(calls, files)
