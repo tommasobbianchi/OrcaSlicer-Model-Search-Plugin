@@ -72,4 +72,16 @@ jobs:
             https://api.orcaslicer.com/api/v1/plugin-publish/releases)"
           cat response.json
           echo
-          [ "$status" = "201" ]
+          echo "http_status=$status"
+          # 201 is "published". The hub also answers 2xx with
+          # {"status":"held_for_review"} when its AI scan flags the submission —
+          # that is an ACCEPTED upload awaiting a maintainer, not a failure, and
+          # the old `[ "$status" = "201" ]` reported the first 0.4.0 publish as
+          # broken when the release had in fact landed. Fail only on a non-2xx.
+          case "$status" in
+            2??) ;;
+            *) echo "OrcaCloud refused the release (HTTP $status)" >&2; exit 1 ;;
+          esac
+          if [ "$(jq -r '.status // ""' response.json)" = "held_for_review" ]; then
+            echo "::notice::Uploaded and HELD FOR REVIEW — not live until a maintainer approves it."
+          fi
