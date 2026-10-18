@@ -78,6 +78,21 @@ only works on the instance the host built; a hand-constructed one raises "only a
 capability loaded by the plugin host", which is what the debug autorun hits. `get_default_config()`
 seeds the Config tab's JSON editor with `{"makerworld_token": ""}` so the key names itself.
 
+**Where the user gets the token** (the gap that made MakerWorld unusable in practice: nothing
+anywhere said this). The bearer is the `accessToken` that `POST
+api.bambulab.com/v1/user-service/user/login` returns at the top level, and the site attaches it
+to every download it performs. So the instruction the plugin now gives — sign in at
+makerworld.com, F12 > Network, click Download on any model, copy the text after `Bearer ` from
+that request's `Authorization` header — cannot go stale: it reads the header off a real request
+instead of naming a cookie or storage key the site is free to rename.
+
+Verified live 2026-10-18: calls 1 and 2 still return 200 anonymously (design 1400373 ->
+`modelId` `US300293b2858c3b`, 7 profiles); call 3 returns **401 `{"code":4,"error":"Please
+login."}`** with no token, with a bogus bearer and with the query param omitted. The gate is
+authentication and nothing else — not geo, not Cloudflare, not a dead route. `designExtension.
+model_files` is empty on that design, so there is no anonymous file route to fall back to. An
+authorized **200 is still unverified** — it needs a real Bambu account.
+
 Reading OrcaSlicer's *own* Bambu login is not an option and should not be attempted:
 `PluginAuditManager::default_denied_filenames()` blocks `OrcaSlicer.conf/.ini` and
 `orca_refresh_token.sec` to plugins, and the comment in `is_denied_filename` names symlink and

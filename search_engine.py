@@ -660,6 +660,19 @@ class ThingiverseSearcher:
         return results
 
 
+# Telling the user to "paste your Bambu Cloud token" without saying where to find
+# one is what made this platform unusable in practice: no MakerWorld screen shows
+# a token. The bearer is minted by POST /v1/user-service/user/login (accessToken,
+# top level) and the site attaches it to every download, so reading it off one of
+# those requests is instruction-proof — it survives any change to where the site
+# keeps the session.
+_MW_TOKEN_HELP = (
+    "To get your token: sign in at makerworld.com, press F12 for DevTools, open "
+    "the Network tab, click Download on any model, and copy the text after "
+    "\"Bearer \" from that request's Authorization header. Paste it under "
+    "Plugins > 3D Model Search > Config, as \"makerworld_token\".")
+
+
 class MakerWorldSearcher:
     # Matches the "platform" field of this adapter's results, so _do_search can
     # check it against _FILE_RESOLVERS before offering the platform at all.
@@ -769,9 +782,7 @@ class MakerWorldSearcher:
         token = ((tokens or {}).get("makerworld_token") or "").strip()
         if not token:
             raise RuntimeError(
-                "MakerWorld serves files only to an account. Paste your own Bambu "
-                "Cloud token into Plugins > 3D Model Search > Config, under "
-                '"makerworld_token".')
+                "MakerWorld serves files only to an account. " + _MW_TOKEN_HELP)
         m = re.search(r"/models/(\d+)", model_url or "")
         if not m:
             return []
@@ -1097,6 +1108,13 @@ PAGE = r"""<!DOCTYPE html>
     $("detail").classList.add("active");
   }
 
+  var TOKEN_HELP = {
+    "MakerWorld": " Sign in at makerworld.com, press F12 \u203a Network, click Download"
+      + " on any model, and copy the text after \"Bearer \" from that request's"
+      + " Authorization header into Plugins \u203a 3D Model Search \u203a Config,"
+      + " as \"makerworld_token\"."
+  };
+
   // A result the plugin cannot fetch must say why on the panel, not on the
   // press: pressing a button that then reports a login wall is the dead end
   // this replaces.
@@ -1107,8 +1125,10 @@ PAGE = r"""<!DOCTYPE html>
       gate.textContent = "";
       return;
     }
-    gate.textContent = model.platform + " serves files only to an account. Add your own"
-      + " token under Plugins › 3D Model Search › Config to import from it.";
+    // Only MakerWorld has a token route today; the others are gated because no
+    // resolver exists for them at all, and a recipe would be a lie there.
+    gate.textContent = model.platform + " serves files only to an account."
+      + (TOKEN_HELP[model.platform] || " The plugin cannot fetch its files yet.");
     gate.classList.add("active");
     btn.disabled = true;
     btn.textContent = "Sign in to " + model.platform + " to import";
@@ -1377,32 +1397,32 @@ if orca is not None:
             can carry dozens of parts, and importing all of them unasked buries the
             plate.
             """
-            if files:
+            if files is None:
+                platform = model.get("platform", "")
+                resolver = _FILE_RESOLVERS.get(platform)
+                if resolver is None:
+                    # Defensive only: the panel disables Import for these.
+                    self._post({"action": "error", "message":
+                                "%s serves no file the plugin can fetch, so it cannot be "
+                                "imported." % (platform or "This platform")})
+                    return
+                tokens = self._tokens()
+                try:
+                    # A missing token for a gated platform surfaces here, as the
+                    # resolver's own message naming the config key to fill.
+                    files = resolver(model.get("url", ""), tokens)
+                except Exception as e:
+                    self._post({"action": "error", "message": f"Could not list files: {e}"})
+                    return
+                if not files:
+                    self._post({"action": "error", "message": "No downloadable files found."})
+                    return
+                if len(files) > 1:
+                    self._post({"action": "choose_files", "files": files})
+                    return
+                self._import_files(model, files, tokens)
+            else:
                 self._import_files(model, files, self._tokens())
-                return
-            platform = model.get("platform", "")
-            resolver = _FILE_RESOLVERS.get(platform)
-            if resolver is None:
-                # Defensive only: the panel disables Import for these.
-                self._post({"action": "error", "message":
-                            "%s serves no file the plugin can fetch, so it cannot be "
-                            "imported." % (platform or "This platform")})
-                return
-            tokens = self._tokens()
-            try:
-                # A missing token for a gated platform surfaces here, as the
-                # resolver's own message naming the config key to fill.
-                files = resolver(model.get("url", ""), tokens)
-            except Exception as e:
-                self._post({"action": "error", "message": f"Could not list files: {e}"})
-                return
-            if not files:
-                self._post({"action": "error", "message": "No downloadable files found."})
-                return
-            if len(files) > 1:
-                self._post({"action": "choose_files", "files": files})
-                return
-            self._import_files(model, files, tokens)
 
         def _import_files(self, model, files, tokens=None):
             minter = _URL_MINTERS.get(model.get("platform", ""))
