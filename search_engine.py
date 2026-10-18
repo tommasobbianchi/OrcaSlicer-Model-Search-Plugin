@@ -447,11 +447,16 @@ class MakeronlineSearcher:
                     "redirectUri": MAKERONLINE_BASE,
                     "scope": "read",
                     "state": MakeronlineSearcher.CAS_APPLICATION},
+            # These are the fields the site's own sign-in sends, observed on the
+            # wire: no autoSignin, no signinMethod. It also sends a 32-char
+            # riskToken from its bot-risk SDK, which cannot be produced outside
+            # the page; omitting it is accepted at least as far as the account
+            # lookup, and a refusal here surfaces Casdoor's own wording.
             json={"application": MakeronlineSearcher.CAS_APPLICATION,
                   "organization": MakeronlineSearcher.CAS_ORGANIZATION,
                   "username": email, "password": password,
-                  "autoSignin": True, "type": "code",
-                  "signinMethod": "Password"},
+                  "remember": True, "isRecMarEmail": False,
+                  "type": "code"},
             headers=MakeronlineSearcher._headers(), timeout=30)
         if r.status_code != 200:
             raise RuntimeError(_api_error(r, "Anycubic would not accept the sign-in"))

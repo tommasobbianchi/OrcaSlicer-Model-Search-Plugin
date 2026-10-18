@@ -223,6 +223,10 @@ def test_makeronline_signs_in_with_a_password_and_keeps_only_the_token():
     assert posts[0]["json"]["application"] == "ac_maker_online"
     assert posts[0]["json"]["organization"] == "anycubic"
     assert posts[0]["json"]["type"] == "code"
+    # The live page sends neither of these; matching it exactly is the whole
+    # point of not inventing a request shape.
+    assert "autoSignin" not in posts[0]["json"]
+    assert "signinMethod" not in posts[0]["json"]
     assert "hunter2" not in json.dumps(posts[1:]), \
         "the password must not travel past Anycubic"
 
