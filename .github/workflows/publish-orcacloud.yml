@@ -49,9 +49,15 @@ jobs:
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=orcacloud" | jq -r .value)"
           version="${GITHUB_REF_NAME#v}"
           changelog="$(jq -r '.release.body // ""' "$GITHUB_EVENT_PATH" | head -c 4000)"
-          metadata="$(jq -cn --arg version "$version" --arg changelog "$changelog" \
-            '{version: $version} + (if $changelog == "" then {} else {changelog: $changelog} end)')"
-          args=(-F "metadata=$metadata")
+          jq -cn --arg version "$version" --arg changelog "$changelog" \
+            '{version: $version} + (if $changelog == "" then {} else {changelog: $changelog} end)' \
+            > metadata.json
+          # Read from the file, never -F "metadata=$json": curl treats ';' in an
+          # -F value as a parameter separator (;type=, ;filename=), so a single
+          # semicolon anywhere in the release notes turns the body into
+          # VALIDATION_ERROR "Metadata must be valid JSON". Cost a failed Support
+          # Fins publish on 2026-09-21.
+          args=(-F "metadata=<metadata.json")
           shopt -s nullglob
           for file in $PLUGIN_FILES; do
             args+=(-F "files=@$file")
