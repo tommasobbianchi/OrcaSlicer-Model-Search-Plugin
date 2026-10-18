@@ -412,6 +412,157 @@ class MakeronlineSearcher:
         }
 
 
+    # Makeronline runs no login of its own: the site signs in through Anycubic's
+    # Casdoor SSO, whose settings it publishes in its own bundle (Auth_CLIENT_ID,
+    # Auth_SIGN_UP_URL=/signup/ac_maker_online). That application answers
+    # enableCodeSignin:false, so unlike Bambu there is no e-mail code to wait
+    # for: it really is e-mail + password. Both are typed in the plugin's own
+    # window, posted straight to Anycubic, and neither is kept - only the site
+    # token that comes back is stored.
+    CAS_LOGIN_URL = "https://cas.anycubic.com/api/login"
+    CAS_CLIENT_ID = "69ce24b6eaf78e597ac0"
+    CAS_APPLICATION = "ac_maker_online"
+    CAS_ORGANIZATION = "anycubic"
+    LOGIN_URL = f"{MAKERONLINE_BASE}/api/v2/auth/login"
+    DOWNLOAD_URL = f"{MAKERONLINE_BASE}/api/file/download"
+
+    @staticmethod
+    def _headers():
+        return {"Content-Type": "application/json", "User-Agent": "OrcaSlicer/2.0"}
+
+    @staticmethod
+    def sign_in(email, password):
+        """Anycubic account -> OAuth code -> Makeronline token, in two calls.
+
+        Nothing here opens a browser: Casdoor's /api/login takes the credentials
+        directly and hands back the authorisation code the redirect would
+        otherwise carry in the URL.
+        """
+        import requests
+
+        r = requests.post(
+            MakeronlineSearcher.CAS_LOGIN_URL,
+            params={"clientId": MakeronlineSearcher.CAS_CLIENT_ID,
+                    "responseType": "code",
+                    "redirectUri": MAKERONLINE_BASE,
+                    "scope": "read",
+                    "state": MakeronlineSearcher.CAS_APPLICATION},
+            json={"application": MakeronlineSearcher.CAS_APPLICATION,
+                  "organization": MakeronlineSearcher.CAS_ORGANIZATION,
+                  "username": email, "password": password,
+                  "autoSignin": True, "type": "code",
+                  "signinMethod": "Password"},
+            headers=MakeronlineSearcher._headers(), timeout=30)
+        if r.status_code != 200:
+            raise RuntimeError(_api_error(r, "Anycubic would not accept the sign-in"))
+        body = r.json() or {}
+        # Casdoor says so in its own words ("The user ... doesn't exist",
+        # "password is incorrect"), which beats any wording invented here.
+        if (body.get("status") or "") != "ok":
+            raise RuntimeError(body.get("msg") or "Anycubic rejected the sign-in.")
+        data = body.get("data")
+        code = data if isinstance(data, str) else (data or {}).get("code") or ""
+        if not code:
+            raise RuntimeError("Anycubic signed in but returned no authorisation "
+                               "code, so Makeronline cannot be reached.")
+        return MakeronlineSearcher._exchange(code)
+
+    @staticmethod
+    def _exchange(code):
+        """Trade the Casdoor code for the token Makeronline's own API wants."""
+        import requests
+
+        r = requests.post(MakeronlineSearcher.LOGIN_URL,
+                          json={"code": code,
+                                "state": MakeronlineSearcher.CAS_APPLICATION},
+                          headers=MakeronlineSearcher._headers(), timeout=30)
+        if r.status_code != 200:
+            raise RuntimeError(_api_error(r, "Makeronline would not accept the sign-in"))
+        body = r.json() or {}
+        if body.get("code") != 0:
+            raise RuntimeError(body.get("message") or
+                               "Makeronline refused the Anycubic sign-in.")
+        data = body.get("data") or {}
+        token = (data.get("token") or data.get("access_token")
+                 or data.get("accessToken") or "")
+        if not token:
+            raise RuntimeError("Makeronline accepted the sign-in but returned no "
+                               "token, so downloads would still be refused.")
+        return token
+
+    @staticmethod
+    def get_files(model_url, tokens=None):
+        """The model's own files. Anonymous: only the download needs the token.
+
+        The URLs are not minted here - /api/file/download issues a signed S3 link
+        per file, and listing a model with a dozen parts would spend a dozen
+        authenticated calls on files the user may not pick.
+        """
+        import requests
+
+        token = ((tokens or {}).get("makeronline_token") or "").strip()
+        if not token:
+            raise RuntimeError(
+                "Makeronline serves files only to an account. "
+                + _TOKEN_HELP["Makeronline"]
+                + ' Use the Accounts button in the plugin window, or set '
+                + '"makeronline_token" in Plugins > 3D Model Search > Config.')
+        m = re.search(r"/(\d+)\.html", model_url or "")
+        if not m:
+            return []
+        mold_id = m.group(1)
+        r = requests.get(f"{MAKERONLINE_BASE}/api/mold/detail",
+                         params={"id": mold_id},
+                         headers={"User-Agent": "OrcaSlicer/2.0"}, timeout=30)
+        r.raise_for_status()
+        body = r.json() or {}
+        if body.get("code") != 0:
+            raise RuntimeError(body.get("message") or "Makeronline returned no detail.")
+        files = []
+        for f in (body.get("data") or {}).get("files") or []:
+            key = f.get("key")
+            if not key:
+                continue
+            files.append({
+                "name": f.get("file_name") or ("file-%s" % f.get("file_id", "")),
+                "url": "",
+                "_key": key,
+                "_mold_id": mold_id,
+            })
+        return files
+
+    @staticmethod
+    def mint_url(entry, tokens=None):
+        """Turn one picked file into a signed S3 URL, valid for minutes."""
+        import requests
+
+        token = ((tokens or {}).get("makeronline_token") or "").strip()
+        if not token:
+            raise RuntimeError("Makeronline needs your Anycubic account token.")
+        headers = dict(MakeronlineSearcher._headers(), Authorization=token)
+        r = requests.post(
+            MakeronlineSearcher.DOWNLOAD_URL,
+            json={"key": entry["_key"], "file_type": 1,
+                  "mold_id": int(entry["_mold_id"]), "is_batch_down": 0},
+            headers=headers, timeout=30)
+        r.raise_for_status()
+        body = r.json() or {}
+        if body.get("code") == 1003:
+            # The site answers 1003 when its risk check wants a captcha, which
+            # only its own page can show. Say so plainly instead of failing blank.
+            raise RuntimeError("Makeronline is asking for a captcha for this "
+                               "download, which the plugin window cannot show. "
+                               "Try again later.")
+        if body.get("code") != 0:
+            raise RuntimeError(body.get("message") or
+                               "Makeronline refused the download.")
+        link = body.get("data")
+        if not isinstance(link, str) or not link:
+            raise RuntimeError("Makeronline returned no download URL for %s."
+                               % entry.get("name", "this file"))
+        return link
+
+
 NEXPRINT_LICENSES = {
     0: ("CC0", "https://creativecommons.org/publicdomain/zero/1.0/"),
     1: ("CC BY", "https://creativecommons.org/licenses/by/4.0/"),
@@ -681,6 +832,11 @@ _TOKEN_HELP = {
         "Sign in with your Bambu Lab account. Enter your email, press Send code, "
         "and type the six digits Bambu emails you. No password is asked for or "
         "stored \u2014 the code login does not use one.",
+    "Makeronline":
+        "Sign in with your Anycubic account \u2014 the same e-mail and password "
+        "you use on makeronline.com. Anycubic offers no e-mail code, so the "
+        "password is asked for here; it goes straight to Anycubic and is never "
+        "stored. Only the token it returns is kept.",
 }
 
 
@@ -956,24 +1112,31 @@ _SEARCHERS = {
 _FILE_RESOLVERS = {
     "Printables": PrintablesSearcher.get_files,
     "MakerWorld": MakerWorldSearcher.get_files,
+    "Makeronline": MakeronlineSearcher.get_files,
 }
 
 # Platforms that serve files only to an account, and the config key holding the
 # user's own token for each. Without the token the platform stays searchable but
 # is not offered for import, so the guard rail holds: everything the panel says
 # it can import, it can import.
-_TOKEN_KEYS = {"MakerWorld": "makerworld_token"}
+_TOKEN_KEYS = {"MakerWorld": "makerworld_token",
+               "Makeronline": "makeronline_token"}
 
 # Platforms whose file list carries no URL, because minting one costs an
 # authenticated call that expires in minutes. Called once per picked file, at
 # download time. A platform absent here has usable URLs already.
-_URL_MINTERS = {"MakerWorld": MakerWorldSearcher.mint_url}
+_URL_MINTERS = {"MakerWorld": MakerWorldSearcher.mint_url,
+                "Makeronline": MakeronlineSearcher.mint_url}
 
-# Platforms that can be signed into from inside the plugin window, without a
-# password: (request a code, exchange it for a token). A platform absent here
-# can still be connected by pasting a token.
+# Platforms that can be signed into from inside the plugin window:
+# (request a code, exchange it for a token). A None first element means the
+# portal has no e-mail code at all, so the second call takes the password
+# instead - Anycubic's SSO answers enableCodeSignin:false, and pretending
+# otherwise would leave the user waiting for a mail that never arrives.
+# A platform absent here can still be connected by pasting a token.
 _AUTH = {"MakerWorld": (MakerWorldSearcher.send_code,
-                        MakerWorldSearcher.login_with_code)}
+                        MakerWorldSearcher.login_with_code),
+         "Makeronline": (None, MakeronlineSearcher.sign_in)}
 
 
 def _accounts(tokens):
@@ -996,7 +1159,9 @@ def _accounts(tokens):
             state = "unavailable"   # nothing the plugin can fetch, with or without one
         rows.append({"platform": name, "state": state, "key": key or "",
                      "help": _TOKEN_HELP.get(name, ""),
-                     "can_sign_in": name in _AUTH})
+                     "can_sign_in": name in _AUTH,
+                     "sign_in_mode": ("code" if (_AUTH.get(name) or (None,))[0]
+                                      else "password") if name in _AUTH else ""})
     rows.sort(key=lambda r: ({"needs_token": 0, "connected": 1, "open": 2,
                               "unavailable": 3}[r["state"]], r["platform"]))
     return rows
@@ -1243,13 +1408,22 @@ PAGE = r"""<!DOCTYPE html>
         html += '<p>' + esc(a.help) + '</p>';
         if (a.can_sign_in) {
           html += '<div class="row"><input type="email" autocomplete="off" data-email="' + i + '"'
-               +  ' placeholder="Your ' + esc(a.platform) + ' account email">'
-               +  '<button data-send="' + i + '" onclick="sendCode(' + i + ')">Send code</button></div>'
-               +  '<div class="row" data-codebox="' + i + '" style="display:none">'
-               +  '<input type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6"'
-               +  ' data-code="' + i + '" placeholder="Six-digit code from the email">'
-               +  '<button onclick="signIn(' + i + ')">Sign in</button></div>'
-               +  '<p class="note" data-note="' + i + '"></p>'
+               +  ' placeholder="Your ' + esc(a.platform) + ' account email">';
+          if (a.sign_in_mode === "password") {
+            // No code to send: the portal's own SSO has none, so asking for one
+            // would leave the user waiting for a mail that never arrives.
+            html += '</div><div class="row">'
+                 +  '<input type="password" autocomplete="off" data-password="' + i + '"'
+                 +  ' placeholder="Your ' + esc(a.platform) + ' password">'
+                 +  '<button onclick="signIn(' + i + ')">Sign in</button></div>';
+          } else {
+            html += '<button data-send="' + i + '" onclick="sendCode(' + i + ')">Send code</button></div>'
+                 +  '<div class="row" data-codebox="' + i + '" style="display:none">'
+                 +  '<input type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6"'
+                 +  ' data-code="' + i + '" placeholder="Six-digit code from the email">'
+                 +  '<button onclick="signIn(' + i + ')">Sign in</button></div>';
+          }
+          html += '<p class="note" data-note="' + i + '"></p>'
                +  '<details><summary>Or paste a token instead</summary>';
         }
         html += '<div class="tokenbox active">'
@@ -1288,11 +1462,21 @@ PAGE = r"""<!DOCTYPE html>
   }
 
   function signIn(i) {
-    var c = acctEl("code", i), v = c && c.value.trim();
-    if (!v) { acctNote(i, "Enter the six-digit code.", true); return; }
+    var pw = ACCOUNTS[i].sign_in_mode === "password";
+    var f = acctEl(pw ? "password" : "code", i), v = f && f.value;
+    if (!pw) v = v && v.trim();
+    if (!v) {
+      acctNote(i, pw ? "Enter your password." : "Enter the six-digit code.", true);
+      return;
+    }
+    var e = acctEl("email", i), em = e && e.value.trim();
+    if (!em) { acctNote(i, "Enter your account email first.", true); return; }
     acctNote(i, "Signing in\u2026");
-    orca.postMessage({action:"sign_in", platform:ACCOUNTS[i].platform,
-                      email:acctEl("email", i).value.trim(), code:v});
+    var m = {action:"sign_in", platform:ACCOUNTS[i].platform, email:em};
+    // The password never goes in the "code" field: _do_auth reads them apart,
+    // and only the token that comes back is ever stored.
+    if (pw) m.password = v; else m.code = v;
+    orca.postMessage(m);
   }
 
   function saveAcct(i) {
@@ -1468,6 +1652,8 @@ PAGE = r"""<!DOCTYPE html>
       if (ai < 0) return;
       var send = acctEl("send", ai);
       if (send) send.disabled = false;
+      var secret = acctEl("password", ai);
+      if (secret) secret.value = "";
       if (!msg.ok) { acctNote(ai, msg.message, true); return; }
       if (msg.stage === "code_sent") {
         var box = document.querySelector('#acct-rows [data-codebox="' + ai + '"]');
@@ -1615,12 +1801,18 @@ if orca is not None:
             send_code, login = pair
             try:
                 if action == "send_code":
+                    if send_code is None:
+                        raise RuntimeError(
+                            "%s has no e-mail code; sign in with your password."
+                            % platform)
                     note = send_code((msg.get("email") or "").strip())
                     self._post({"action": "auth", "ok": True, "platform": platform,
                                 "stage": "code_sent", "message": note})
                     return
+                # Same two-argument call either way: a code for the portals
+                # that mail one, the password for the portals that do not.
                 token = login((msg.get("email") or "").strip(),
-                              (msg.get("code") or "").strip())
+                              (msg.get("code") or msg.get("password") or ""))
             except Exception as e:
                 self._post({"action": "auth", "ok": False, "platform": platform,
                             "message": str(e) or repr(e)})

@@ -191,6 +191,93 @@ def test_a_completed_sign_in_stores_the_token():
                           "message": "Printables cannot be signed into from here."}
 
 
+def test_makeronline_signs_in_with_a_password_and_keeps_only_the_token():
+    """Anycubic's SSO has no e-mail code, so this one really does take a password.
+
+    Measured on the live endpoints: Casdoor answers /api/login with the OAuth
+    code in `data`, and only the site token that follows is worth storing.
+    """
+    posts = []
+    fake = types.ModuleType("requests")
+
+    def post(url, json=None, params=None, headers=None, timeout=None):
+        posts.append({"url": url, "json": json or {}, "params": params or {}})
+        if url.endswith("cas.anycubic.com/api/login"):
+            if (json or {}).get("password") == "hunter2":
+                return _Resp({"status": "ok", "msg": "", "data": "CODE42"})
+            return _Resp({"status": "error", "msg": "password is incorrect"})
+        if url.endswith("/api/v2/auth/login"):
+            assert (json or {}).get("code") == "CODE42"
+            return _Resp({"code": 0, "data": {"token": "JWT"}})
+        if url.endswith("/api/file/download"):
+            return _Resp({"code": 0, "data": "https://s3/signed.stl"})
+        raise AssertionError("unexpected call: " + url)
+
+    fake.post = post
+    sys.modules["requests"] = fake
+
+    token = script.MakeronlineSearcher.sign_in("someone@example.com", "hunter2")
+    assert token == "JWT", "the stored credential is the site token, not the password"
+    # The application and organization are what Casdoor needs to find the
+    # account at all; without them it answers with a null application.
+    assert posts[0]["json"]["application"] == "ac_maker_online"
+    assert posts[0]["json"]["organization"] == "anycubic"
+    assert posts[0]["json"]["type"] == "code"
+    assert "hunter2" not in json.dumps(posts[1:]), \
+        "the password must not travel past Anycubic"
+
+    try:
+        script.MakeronlineSearcher.sign_in("someone@example.com", "wrong")
+    except RuntimeError as e:
+        assert "incorrect" in str(e), "the portal's own words, not an invented one"
+    else:
+        raise AssertionError("a rejected sign-in must raise")
+
+    # A failed sign-in stores nothing, so the platform never claims to be
+    # connected and the import it would offer cannot be a dead end.
+    cap = script.SearchEngineScript()
+    cap._stored = "{}"
+    posted = []
+    cap._post = posted.append
+    cap._do_auth("sign_in", {"platform": "Makeronline",
+                             "email": "someone@example.com", "password": "wrong"})
+    assert json.loads(cap.get_config()) == {}, "nothing is stored on failure"
+    assert posted[-1]["ok"] is False
+
+    cap._do_auth("send_code", {"platform": "Makeronline", "email": "x@y.z"})
+    assert posted[-1]["ok"] is False and "password" in posted[-1]["message"], \
+        "a portal with no e-mail code must say so rather than promise a mail"
+
+    cap._do_auth("sign_in", {"platform": "Makeronline",
+                             "email": "someone@example.com", "password": "hunter2"})
+    assert json.loads(cap.get_config())["makeronline_token"] == "JWT"
+    assert "hunter2" not in json.dumps(posted), "no reply may carry the password"
+
+    rows = {r["platform"]: r for r in script._accounts({})}
+    assert rows["Makeronline"]["sign_in_mode"] == "password"
+    assert rows["MakerWorld"]["sign_in_mode"] == "code"
+
+    url = script.MakeronlineSearcher.mint_url(
+        {"_key": "b48e37341606360c43d2807eb07dc2f0", "_mold_id": "151818",
+         "name": "Box stl.stl"}, {"makeronline_token": "JWT"})
+    assert url == "https://s3/signed.stl"
+    # The live endpoint rejects anything else: file_type 1 is the model file and
+    # mold_id is the integer id out of the /<id>.html URL.
+    assert posts[-1]["json"] == {"key": "b48e37341606360c43d2807eb07dc2f0",
+                                 "file_type": 1, "mold_id": 151818,
+                                 "is_batch_down": 0}, posts[-1]["json"]
+
+
+def test_makeronline_resolver_needs_a_token():
+    try:
+        script.MakeronlineSearcher.get_files(
+            "https://www.makeronline.com/model/Box/151818.html", {})
+    except RuntimeError as e:
+        assert "makeronline_token" in str(e), "the error must name the config key"
+    else:
+        raise AssertionError("resolving without a token must raise")
+
+
 def _install_fake_requests():
     """Patch the `requests` module the resolver imports, recording every call."""
     calls = []
@@ -222,6 +309,8 @@ if __name__ == "__main__":
     test_accounts_rows_match_what_is_importable()
     test_signing_in_asks_for_a_code_and_never_a_password()
     test_a_completed_sign_in_stores_the_token()
+    test_makeronline_signs_in_with_a_password_and_keeps_only_the_token()
+    test_makeronline_resolver_needs_a_token()
     calls = _install_fake_requests()
     files = test_listing_profiles_mints_nothing(calls)
     test_minting_uses_the_alphanumeric_model_id(calls, files)
