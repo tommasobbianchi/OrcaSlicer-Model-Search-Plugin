@@ -6,7 +6,7 @@
 # name = "3D Model Search Engine"
 # description = "Search 3D models from inside OrcaSlicer and load them straight onto the plate. Printables needs no account. MakerWorld signs in from the plugin’s own window with a six-digit code Bambu emails you, and Makeronline with the Anycubic account you already have — whichever each portal actually offers, asked for in the plugin window and never in a browser. Credentials are sent only to the portal they belong to; just the token it returns is kept, in OrcaSlicer’s plugin config and nowhere else. The licence is always shown before the download, and no external browser is ever opened."
 # author = "Tommaso Bianchi"
-# version = "0.5.0"
+# version = "0.5.1"
 # ///
 
 try:
@@ -423,7 +423,11 @@ class MakeronlineSearcher:
     CAS_CLIENT_ID = "69ce24b6eaf78e597ac0"
     CAS_APPLICATION = "ac_maker_online"
     CAS_ORGANIZATION = "anycubic"
-    LOGIN_URL = f"{MAKERONLINE_BASE}/api/v2/auth/login"
+    # The site exchanges the code with a GET on /api/login, not with the
+    # api/v2/auth/login its bundle also defines: that one answers "Server
+    # internal error" exactly as unknown routes do. This one answers
+    # invalid_grant / invalid_request, i.e. it really runs the exchange.
+    EXCHANGE_URL = f"{MAKERONLINE_BASE}/api/login"
     DOWNLOAD_URL = f"{MAKERONLINE_BASE}/api/file/download"
 
     @staticmethod
@@ -477,19 +481,21 @@ class MakeronlineSearcher:
         """Trade the Casdoor code for the token Makeronline's own API wants."""
         import requests
 
-        r = requests.post(MakeronlineSearcher.LOGIN_URL,
-                          json={"code": code,
-                                "state": MakeronlineSearcher.CAS_APPLICATION},
-                          headers=MakeronlineSearcher._headers(), timeout=30)
+        r = requests.get(MakeronlineSearcher.EXCHANGE_URL,
+                         params={"code": code,
+                                 "state": MakeronlineSearcher.CAS_APPLICATION},
+                         headers={"User-Agent": "OrcaSlicer/2.0"}, timeout=30)
         if r.status_code != 200:
             raise RuntimeError(_api_error(r, "Makeronline would not accept the sign-in"))
         body = r.json() or {}
         if body.get("code") != 0:
-            raise RuntimeError(body.get("message") or
-                               "Makeronline refused the Anycubic sign-in.")
-        data = body.get("data") or {}
-        token = (data.get("token") or data.get("access_token")
-                 or data.get("accessToken") or "")
+            # Its words are OAuth's, so say what they mean here.
+            msg = body.get("message") or ""
+            if msg == "invalid_grant":
+                msg = ("Anycubic's sign-in code was refused \u2014 it is used once "
+                       "and expires in moments. Try signing in again.")
+            raise RuntimeError(msg or "Makeronline refused the Anycubic sign-in.")
+        token = (body.get("data") or {}).get("access_token") or ""
         if not token:
             raise RuntimeError("Makeronline accepted the sign-in but returned no "
                                "token, so downloads would still be refused.")

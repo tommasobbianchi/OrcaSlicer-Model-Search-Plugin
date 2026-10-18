@@ -206,14 +206,24 @@ def test_makeronline_signs_in_with_a_password_and_keeps_only_the_token():
             if (json or {}).get("password") == "hunter2":
                 return _Resp({"status": "ok", "msg": "", "data": "CODE42"})
             return _Resp({"status": "error", "msg": "password is incorrect"})
-        if url.endswith("/api/v2/auth/login"):
-            assert (json or {}).get("code") == "CODE42"
-            return _Resp({"code": 0, "data": {"token": "JWT"}})
         if url.endswith("/api/file/download"):
             return _Resp({"code": 0, "data": "https://s3/signed.stl"})
-        raise AssertionError("unexpected call: " + url)
+        raise AssertionError("unexpected POST: " + url)
+
+    def get(url, params=None, headers=None, timeout=None):
+        posts.append({"url": url, "json": {}, "params": params or {}})
+        # The exchange is a GET on /api/login, which is what the site does;
+        # the api/v2/auth/login in its bundle is not served and answers like
+        # an unknown route.
+        if url.endswith("www.makeronline.com/api/login"):
+            assert (params or {}).get("code") == "CODE42"
+            assert (params or {}).get("state") == "ac_maker_online"
+            return _Resp({"code": 0, "data": {"access_token": "JWT",
+                                              "expire_time": 1793000000}})
+        raise AssertionError("unexpected GET: " + url)
 
     fake.post = post
+    fake.get = get
     sys.modules["requests"] = fake
 
     token = script.MakeronlineSearcher.sign_in("someone@example.com", "hunter2")
