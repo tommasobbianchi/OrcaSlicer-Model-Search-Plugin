@@ -4,9 +4,9 @@
 #
 # [tool.orcaslicer.plugin]
 # name = "3D Model Search Engine"
-# description = "Search 3D models from inside OrcaSlicer and load them straight onto the plate. Printables needs no account. MakerWorld signs in from the plugin's own window with a six-digit code Bambu emails you — no password is ever asked for, and the token it returns is kept in OrcaSlicer's plugin config, nowhere else. The licence is always shown before the download, and no external browser is ever opened."
+# description = "Search 3D models from inside OrcaSlicer and load them straight onto the plate. Printables needs no account. MakerWorld signs in from the plugin’s own window with a six-digit code Bambu emails you, and Makeronline with the Anycubic account you already have — whichever each portal actually offers, asked for in the plugin window and never in a browser. Credentials are sent only to the portal they belong to; just the token it returns is kept, in OrcaSlicer’s plugin config and nowhere else. The licence is always shown before the download, and no external browser is ever opened."
 # author = "Tommaso Bianchi"
-# version = "0.4.0"
+# version = "0.5.0"
 # ///
 
 try:
